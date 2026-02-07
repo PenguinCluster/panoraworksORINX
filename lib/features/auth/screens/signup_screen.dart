@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/auth_service.dart';
 import '../../../shared/widgets/oauth_buttons.dart';
+import '../../../core/utils/error_handler.dart';
 
 class SignupScreen extends StatefulWidget {
   const SignupScreen({super.key});
@@ -40,25 +40,12 @@ class _SignupScreenState extends State<SignupScreen> {
         username: _usernameController.text.trim(),
       );
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Verification email sent! Please check your inbox.'),
-            backgroundColor: Colors.green,
-          ),
-        );
+        ErrorHandler.showSuccess(context, 'Verification email sent! Please check your inbox.');
         context.go('/login');
-      }
-    } on AuthException catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(e.message), backgroundColor: Colors.red),
-        );
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('An unexpected error occurred'), backgroundColor: Colors.red),
-        );
+        ErrorHandler.handle(context, e, customMessage: 'Signup failed');
       }
     } finally {
       if (mounted) setState(() => _isLoading = false);

@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/auth_service.dart';
+import '../../../core/utils/error_handler.dart';
 
 class ForgotPasswordScreen extends StatefulWidget {
   const ForgotPasswordScreen({super.key});
@@ -29,25 +29,12 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
     try {
       await _authService.sendPasswordResetEmail(_emailController.text.trim());
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Password reset email sent! Please check your inbox.'),
-            backgroundColor: Colors.green,
-          ),
-        );
+        ErrorHandler.showSuccess(context, 'Password reset email sent! Please check your inbox.');
         context.go('/login');
-      }
-    } on AuthException catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(e.message), backgroundColor: Colors.red),
-        );
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('An unexpected error occurred'), backgroundColor: Colors.red),
-        );
+        ErrorHandler.handle(context, e, customMessage: 'Failed to send reset email');
       }
     } finally {
       if (mounted) setState(() => _isLoading = false);

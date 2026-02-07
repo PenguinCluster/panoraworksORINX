@@ -1,4 +1,5 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../../core/utils/logger.dart';
 
 class AuthService {
   final _supabase = Supabase.instance.client;
@@ -10,7 +11,8 @@ class AuthService {
     String? username,
     String? fullName,
   }) async {
-    return await _supabase.auth.signUp(
+    AppLogger.info('Attempting signup for $email');
+    final response = await _supabase.auth.signUp(
       email: email,
       password: password,
       data: {
@@ -18,6 +20,8 @@ class AuthService {
         if (fullName != null) 'full_name': fullName,
       },
     );
+    AppLogger.info('Signup successful for $email');
+    return response;
   }
 
   // Sign in with email and password
@@ -25,14 +29,18 @@ class AuthService {
     required String email,
     required String password,
   }) async {
-    return await _supabase.auth.signInWithPassword(
+    AppLogger.info('Attempting signin for $email');
+    final response = await _supabase.auth.signInWithPassword(
       email: email,
       password: password,
     );
+    AppLogger.info('Signin successful for $email');
+    return response;
   }
 
   // Sign in with OAuth
   Future<bool> signInWithOAuth(OAuthProvider provider) async {
+    AppLogger.info('Attempting OAuth signin with ${provider.name}');
     return await _supabase.auth.signInWithOAuth(
       provider,
       redirectTo: 'https://seftogufmytdplmopzjx.supabase.co/auth/v1/callback',
@@ -41,14 +49,17 @@ class AuthService {
 
   // Send password reset email
   Future<void> sendPasswordResetEmail(String email) async {
+    AppLogger.info('Attempting password reset for $email');
     await _supabase.auth.resetPasswordForEmail(
       email,
       redirectTo: 'https://seftogufmytdplmopzjx.supabase.co/auth/v1/callback',
     );
+    AppLogger.info('Password reset email sent to $email');
   }
 
   // Sign out
   Future<void> signOut() async {
+    AppLogger.info('Signing out user');
     await _supabase.auth.signOut();
   }
 

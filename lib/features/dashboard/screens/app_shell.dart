@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../auth/services/auth_service.dart';
+import '../../../core/state/profile_manager.dart';
 
 class AppShell extends StatelessWidget {
   final Widget child;
@@ -11,6 +12,9 @@ class AppShell extends StatelessWidget {
   Widget build(BuildContext context) {
     final isMobile = MediaQuery.of(context).size.width < 900;
     final theme = Theme.of(context);
+
+    // Ensure ProfileManager is initialized
+    ProfileManager.instance;
 
     return Scaffold(
       drawer: isMobile ? const _Sidebar() : null,
@@ -42,7 +46,6 @@ class _Sidebar extends StatelessWidget {
     final theme = Theme.of(context);
     final isMobile = MediaQuery.of(context).size.width < 900;
     final authService = AuthService();
-    final user = authService.currentUser;
     final String location = GoRouterState.of(context).matchedLocation;
 
     return Container(
@@ -78,7 +81,7 @@ class _Sidebar extends StatelessWidget {
             ),
 
           // Profile Section
-          _ProfileSection(user: user, authService: authService),
+          _ProfileSection(authService: authService),
 
           const Divider(indent: 16, endIndent: 16),
 
@@ -125,26 +128,23 @@ class _Sidebar extends StatelessWidget {
 }
 
 class _ProfileSection extends StatelessWidget {
-  final User? user;
   final AuthService authService;
 
-  const _ProfileSection({required this.user, required this.authService});
+  const _ProfileSection({required this.authService});
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final email = user?.email ?? 'user@example.com';
 
-    return FutureBuilder<Map<String, dynamic>?>(
-      future: Supabase.instance.client
-          .from('profiles')
-          .select()
-          .eq('id', user?.id ?? '')
-          .maybeSingle(),
-      builder: (context, snapshot) {
-        final profile = snapshot.data;
-        final String displayName = profile?['username'] ?? email.split('@').first;
-        final String initials = displayName.isNotEmpty ? displayName[0].toUpperCase() : 'U';
+    return ValueListenableBuilder<UserProfile?>(
+      valueListenable: ProfileManager.instance.profileNotifier,
+      builder: (context, userProfile, child) {
+        if (userProfile == null) {
+          return const Padding(
+            padding: EdgeInsets.all(16.0),
+            child: Center(child: CircularProgressIndicator()),
+          );
+        }
 
         return Padding(
           padding: const EdgeInsets.all(16.0),
@@ -158,15 +158,20 @@ class _ProfileSection extends StatelessWidget {
               child: ExpansionTile(
                 leading: CircleAvatar(
                   backgroundColor: theme.primaryColor,
-                  child: Text(initials, style: const TextStyle(color: Colors.white)),
+                  backgroundImage: userProfile.avatarUrl.isNotEmpty 
+                      ? NetworkImage(userProfile.avatarUrl) 
+                      : null,
+                  child: userProfile.avatarUrl.isEmpty 
+                      ? Text(userProfile.initials, style: const TextStyle(color: Colors.white))
+                      : null,
                 ),
                 title: Text(
-                  displayName,
+                  userProfile.displayName,
                   style: const TextStyle(fontWeight: FontWeight.bold),
                   overflow: TextOverflow.ellipsis,
                 ),
                 subtitle: Text(
-                  email,
+                  userProfile.email,
                   style: theme.textTheme.bodySmall,
                   overflow: TextOverflow.ellipsis,
                 ),

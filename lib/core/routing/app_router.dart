@@ -10,6 +10,13 @@ import '../../features/dashboard/screens/placeholder_screen.dart';
 import '../../features/settings/screens/settings_screen.dart';
 import '../../features/settings/screens/plans_pricing_screen.dart';
 import '../../features/settings/screens/get_app_screen.dart';
+import '../../features/dashboard/screens/overview_screen.dart';
+import '../../features/dashboard/screens/content_hub_screen.dart';
+import '../../features/dashboard/screens/live_alerts_screen.dart';
+import '../../features/dashboard/screens/keyword_monitoring_screen.dart';
+import '../../features/settings/screens/help/privacy_policy_screen.dart';
+import '../../features/settings/screens/help/contact_us_screen.dart';
+import '../../features/settings/screens/help/suggest_improvements_screen.dart';
 
 final appRouter = GoRouter(
   initialLocation: '/',
@@ -55,19 +62,19 @@ final appRouter = GoRouter(
       routes: [
         GoRoute(
           path: '/app/overview',
-          builder: (context, state) => const PlaceholderScreen(title: 'Overview'),
+          builder: (context, state) => const OverviewScreen(),
         ),
         GoRoute(
           path: '/app/content',
-          builder: (context, state) => const PlaceholderScreen(title: 'Content Hub'),
+          builder: (context, state) => const ContentHubScreen(),
         ),
         GoRoute(
           path: '/app/alerts',
-          builder: (context, state) => const PlaceholderScreen(title: 'Live Alerts'),
+          builder: (context, state) => const LiveAlertsScreen(),
         ),
         GoRoute(
           path: '/app/keywords',
-          builder: (context, state) => const PlaceholderScreen(title: 'Keyword Monitoring'),
+          builder: (context, state) => const KeywordMonitoringScreen(),
         ),
         GoRoute(
           path: '/app/settings',
@@ -80,6 +87,18 @@ final appRouter = GoRouter(
         GoRoute(
           path: '/app/settings/get-app',
           builder: (context, state) => const GetAppScreen(),
+        ),
+        GoRoute(
+          path: '/app/settings/privacy-policy',
+          builder: (context, state) => const PrivacyPolicyScreen(),
+        ),
+        GoRoute(
+          path: '/app/settings/contact-us',
+          builder: (context, state) => const ContactUsScreen(),
+        ),
+        GoRoute(
+          path: '/app/settings/suggest-improvements',
+          builder: (context, state) => const SuggestImprovementsScreen(),
         ),
       ],
     ),

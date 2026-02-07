@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/auth_service.dart';
 import '../../../shared/widgets/oauth_buttons.dart';
+import '../../../core/utils/error_handler.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -34,18 +34,13 @@ class _LoginScreenState extends State<LoginScreen> {
         email: _emailController.text.trim(),
         password: _passwordController.text.trim(),
       );
-      if (mounted) context.go('/app');
-    } on AuthException catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(e.message), backgroundColor: Colors.red),
-        );
+        ErrorHandler.showSuccess(context, 'Login successful');
+        context.go('/app/overview');
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('An unexpected error occurred'), backgroundColor: Colors.red),
-        );
+        ErrorHandler.handle(context, e, customMessage: 'Login failed');
       }
     } finally {
       if (mounted) setState(() => _isLoading = false);

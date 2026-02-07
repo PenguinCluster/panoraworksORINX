@@ -123,7 +123,13 @@ class _HelpAndResourcesButton extends StatelessWidget {
       icon: const Icon(Icons.help_outline),
       tooltip: 'Help and Resources',
       onSelected: (value) {
-        // Handle help actions
+        if (value == 'privacy') {
+          context.go('/app/settings/privacy-policy');
+        } else if (value == 'contact') {
+          context.go('/app/settings/contact-us');
+        } else if (value == 'suggest') {
+          context.go('/app/settings/suggest-improvements');
+        }
       },
       itemBuilder: (context) => [
         const PopupMenuItem(value: 'privacy', child: Text('Privacy Policy')),
