@@ -2,121 +2,107 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers":
+    "authorization, x-client-info, apikey, content-type",
 };
 
-const FLUTTERWAVE_CLIENT_ID = Deno.env.get("FLUTTERWAVE_CLIENT_ID") ?? "";
-const FLUTTERWAVE_CLIENT_SECRET = Deno.env.get("FLUTTERWAVE_CLIENT_SECRET") ?? "";
+const CLIENT_ID = Deno.env.get("FLUTTERWAVE_CLIENT_ID") ?? "";
+const CLIENT_SECRET = Deno.env.get("FLUTTERWAVE_CLIENT_SECRET") ?? "";
 const APP_BASE_URL = Deno.env.get("APP_BASE_URL") ?? "http://127.0.0.1:7357";
 
-serve(async (req) => {
-  if (req.method === "OPTIONS") {
-    return new Response("ok", { headers: corsHeaders });
+// Flutterwave v4 token endpoint (client_credentials)
+const TOKEN_URL =
+  "https://idp.flutterwave.com/realms/flutterwave/protocol/openid-connect/token";
+
+// v4 sandbox base
+const FW_BASE = "https://developersandbox-api.flutterwave.com";
+
+async function getAccessToken(): Promise<string> {
+  if (!CLIENT_ID || !CLIENT_SECRET) {
+    throw new Error("Missing FLUTTERWAVE_CLIENT_ID/FLUTTERWAVE_CLIENT_SECRET secrets");
   }
 
-  console.log("flutterwave-init invoked", { method: req.method, url: req.url });
-  console.log("secrets present?", {
-    hasClientId: !!FLUTTERWAVE_CLIENT_ID,
-    hasClientSecret: !!FLUTTERWAVE_CLIENT_SECRET,
-    appBaseUrl: APP_BASE_URL,
+  const body = new URLSearchParams();
+  body.set("grant_type", "client_credentials");
+  body.set("client_id", CLIENT_ID);
+  body.set("client_secret", CLIENT_SECRET);
+
+  const res = await fetch(TOKEN_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body,
   });
 
+  const json = await res.json();
+  if (!res.ok) {
+    console.error("Token fetch failed:", { status: res.status, json });
+    throw new Error(json?.error_description || json?.error || "Token fetch failed");
+  }
+
+  const token = json?.access_token;
+  if (!token) throw new Error("No access_token returned from Flutterwave");
+  return token;
+}
+
+serve(async (req: Request) => {
+  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+
   try {
-    if (!FLUTTERWAVE_CLIENT_ID || !FLUTTERWAVE_CLIENT_SECRET) {
-      return new Response(
-        JSON.stringify({ error: "Missing Flutterwave credentials in Supabase secrets." }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-      );
-    }
-
-    const body = await req.json().catch(() => null);
-    if (!body) {
-      return new Response(JSON.stringify({ error: "Invalid JSON body." }), {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-
-    const { email, amount, plan_id, user_id, interval } = body;
+    const { email, amount, plan_id, user_id, interval } = await req.json();
 
     if (!email || !amount || !plan_id || !user_id || !interval) {
-      return new Response(
-        JSON.stringify({ error: "Missing required fields: email, amount, plan_id, user_id, interval." }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-      );
+      throw new Error("Missing required fields: email, amount, plan_id, user_id, interval");
     }
 
+    const accessToken = await getAccessToken();
+
     const tx_ref = `orinx_${user_id}_${Date.now()}`;
-    const redirect_url = `${APP_BASE_URL}/app/settings/pricing?status=verifying&tx_ref=${encodeURIComponent(tx_ref)}`;
+    const redirect_url =
+      `${APP_BASE_URL}/app/settings/pricing?status=verifying&tx_ref=${encodeURIComponent(tx_ref)}`;
 
-    // IMPORTANT:
-    // This is NOT true OAuth. We are using the provided "Client Secret" as Bearer token
-    // only as a temporary measure. We log the response so we can confirm if Flutterwave accepts it.
-    const authToken = FLUTTERWAVE_CLIENT_SECRET;
-
+    // NOTE: endpoint/payload may vary by your enabled v4 product.
+    // This uses the v4 sandbox Orchestration direct orders pattern.
     const payload = {
       tx_ref,
       amount,
       currency: "USD",
       redirect_url,
-      payment_options: "card",
-      customer: { email, name: String(email).split("@")[0] },
-      customizations: {
-        title: "ORINX Subscription",
-        description: `Upgrade to Plan ${plan_id}`,
-        logo: "",
-      },
+      customer: { email, name: email.split("@")[0] },
       meta: { user_id, plan_id, interval },
     };
 
-    console.log("Initializing payment", { email, amount, plan_id, interval, tx_ref, redirect_url });
-
-    const response = await fetch("https://api.flutterwave.com/v3/payments", {
+    const fwRes = await fetch(`${FW_BASE}/orchestration/direct-orders`, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${authToken}`,
+        Authorization: `Bearer ${accessToken}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify(payload),
     });
 
-    const text = await response.text();
-    let data: any = null;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      // keep raw text
+    const fwJson = await fwRes.json();
+
+    if (!fwRes.ok) {
+      console.error("Flutterwave init failed:", { status: fwRes.status, fwJson });
+      throw new Error(fwJson?.message || "Flutterwave init failed");
     }
 
-    console.log("Flutterwave response", {
-      status: response.status,
-      ok: response.ok,
-      body: data ?? text,
+    const link =
+      fwJson?.data?.link || fwJson?.data?.checkout_url || fwJson?.data?.payment_url;
+
+    if (!link) {
+      console.error("No checkout link returned:", fwJson);
+      throw new Error("No checkout link returned by Flutterwave");
+    }
+
+    return new Response(JSON.stringify({ status: "success", data: { link, tx_ref } }), {
+      status: 200,
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
-
-    if (!response.ok || !data || data.status !== "success") {
-      return new Response(
-        JSON.stringify({
-          error: "Flutterwave init failed",
-          flutterwave_status: response.status,
-          flutterwave_body: data ?? text,
-        }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-      );
-    }
-
-    // Flutterwave typically returns link under data.link
-    const payment_link = data?.data?.link ?? null;
-
-    return new Response(
-      JSON.stringify({ payment_link, tx_ref, raw: data }),
-      { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
-    );
-  } catch (err) {
-    console.error("Edge Function Error:", err);
-    return new Response(JSON.stringify({ error: String(err?.message ?? err) }), {
-      status: 500,
+  } catch (e) {
+    console.error("Edge Function Error:", e);
+    return new Response(JSON.stringify({ error: (e as Error).message }), {
+      status: 400,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }
