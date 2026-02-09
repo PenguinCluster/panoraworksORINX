@@ -5,6 +5,7 @@ import '../../features/home/screens/home_screen.dart';
 import '../../features/auth/screens/login_screen.dart';
 import '../../features/auth/screens/signup_screen.dart';
 import '../../features/auth/screens/forgot_password_screen.dart';
+import '../../features/auth/screens/join_team_screen.dart';
 import '../../features/dashboard/screens/app_shell.dart';
 import '../../features/dashboard/screens/placeholder_screen.dart';
 import '../../features/settings/screens/settings_screen.dart';
@@ -22,7 +23,8 @@ final appRouter = GoRouter(
   initialLocation: '/',
   redirect: (context, state) {
     final session = Supabase.instance.client.auth.currentSession;
-    final isLoggingIn = state.matchedLocation == '/login' ||
+    final isLoggingIn =
+        state.matchedLocation == '/login' ||
         state.matchedLocation == '/signup' ||
         state.matchedLocation == '/forgot-password';
 
@@ -41,21 +43,19 @@ final appRouter = GoRouter(
     return null;
   },
   routes: [
-    GoRoute(
-      path: '/',
-      builder: (context, state) => const HomeScreen(),
-    ),
-    GoRoute(
-      path: '/login',
-      builder: (context, state) => const LoginScreen(),
-    ),
-    GoRoute(
-      path: '/signup',
-      builder: (context, state) => const SignupScreen(),
-    ),
+    GoRoute(path: '/', builder: (context, state) => const HomeScreen()),
+    GoRoute(path: '/login', builder: (context, state) => const LoginScreen()),
+    GoRoute(path: '/signup', builder: (context, state) => const SignupScreen()),
     GoRoute(
       path: '/forgot-password',
       builder: (context, state) => const ForgotPasswordScreen(),
+    ),
+    GoRoute(
+      path: '/join-team',
+      builder: (context, state) {
+        final token = state.uri.queryParameters['token'];
+        return JoinTeamScreen(token: token);
+      },
     ),
     ShellRoute(
       builder: (context, state, child) => AppShell(child: child),
@@ -78,7 +78,14 @@ final appRouter = GoRouter(
         ),
         GoRoute(
           path: '/app/settings',
-          builder: (context, state) => const SettingsScreen(),
+          redirect: (context, state) => '/app/settings/profile',
+        ),
+        GoRoute(
+          path: '/app/settings/:tab',
+          builder: (context, state) {
+            final tab = state.pathParameters['tab'] ?? 'profile';
+            return SettingsScreen(initialTab: tab);
+          },
         ),
         GoRoute(
           path: '/app/settings/pricing',

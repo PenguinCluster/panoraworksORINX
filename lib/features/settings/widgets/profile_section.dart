@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:image_picker/image_picker.dart';
 import '../../auth/services/auth_service.dart';
 import '../../../core/utils/error_handler.dart';
 import '../../../core/state/profile_manager.dart';
@@ -30,7 +31,9 @@ class _ProfileSectionState extends State<ProfileSection> {
       if (user == null) return;
 
       final responses = await Future.wait<dynamic>([
-        _supabase.from('connected_accounts').select('provider, status, metadata'),
+        _supabase
+            .from('connected_accounts')
+            .select('provider, status, metadata'),
         _supabase.from('profiles').select().eq('id', user.id).maybeSingle(),
       ]);
 
@@ -38,7 +41,7 @@ class _ProfileSectionState extends State<ProfileSection> {
       final profileData = responses[1] as Map<String, dynamic>?;
 
       final connections = {
-        for (var item in connectionsData) item['provider'] as String: item
+        for (var item in connectionsData) item['provider'] as String: item,
       };
 
       if (mounted) {
@@ -50,7 +53,11 @@ class _ProfileSectionState extends State<ProfileSection> {
       }
     } catch (e) {
       if (mounted) {
-        ErrorHandler.handle(context, e, customMessage: 'Failed to load profile data');
+        ErrorHandler.handle(
+          context,
+          e,
+          customMessage: 'Failed to load profile data',
+        );
         setState(() => _isLoading = false);
       }
     }
@@ -62,24 +69,30 @@ class _ProfileSectionState extends State<ProfileSection> {
       if (user == null) return;
 
       await _supabase.from('profiles').update(updates).eq('id', user.id);
-      
+
       // Update local state
       setState(() {
         _profile = {..._profile, ...updates};
       });
-      
+
       // Refresh app-wide state
       await ProfileManager.instance.refreshProfile();
-      
-      if (mounted) ErrorHandler.showSuccess(context, 'Profile updated successfully');
+
+      if (mounted)
+        ErrorHandler.showSuccess(context, 'Profile updated successfully');
     } catch (e) {
-      if (mounted) ErrorHandler.handle(context, e, customMessage: 'Failed to update profile');
+      if (mounted)
+        ErrorHandler.handle(
+          context,
+          e,
+          customMessage: 'Failed to update profile',
+        );
     }
   }
 
   Future<void> _editName() async {
     final controller = TextEditingController(text: _profile['full_name'] ?? '');
-    
+
     await showDialog(
       context: context,
       builder: (context) => AlertDialog(
@@ -113,7 +126,7 @@ class _ProfileSectionState extends State<ProfileSection> {
   Future<void> _editEmail() async {
     final user = _supabase.auth.currentUser;
     final controller = TextEditingController(text: user?.email ?? '');
-    
+
     await showDialog(
       context: context,
       builder: (context) => AlertDialog(
@@ -156,10 +169,18 @@ class _ProfileSectionState extends State<ProfileSection> {
     try {
       await _supabase.auth.updateUser(UserAttributes(email: newEmail));
       if (mounted) {
-        ErrorHandler.showSuccess(context, 'Confirmation email sent to $newEmail');
+        ErrorHandler.showSuccess(
+          context,
+          'Confirmation email sent to $newEmail',
+        );
       }
     } catch (e) {
-      if (mounted) ErrorHandler.handle(context, e, customMessage: 'Failed to update email');
+      if (mounted)
+        ErrorHandler.handle(
+          context,
+          e,
+          customMessage: 'Failed to update email',
+        );
     }
   }
 
@@ -168,16 +189,19 @@ class _ProfileSectionState extends State<ProfileSection> {
       OAuthProvider? oauthProvider;
       if (provider == 'facebook') oauthProvider = OAuthProvider.facebook;
       if (provider == 'discord') oauthProvider = OAuthProvider.discord;
-      
+
       if (oauthProvider != null) {
         await _authService.signInWithOAuth(oauthProvider);
       } else if (provider == 'tiktok') {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('TikTok OAuth integration in progress...'))
+          const SnackBar(
+            content: Text('TikTok OAuth integration in progress...'),
+          ),
         );
       }
     } on AuthException catch (e) {
-      if (e.message.contains('provider is not enabled') || e.code == 'provider_disabled') {
+      if (e.message.contains('provider is not enabled') ||
+          e.code == 'provider_disabled') {
         if (mounted) {
           showDialog(
             context: context,
@@ -185,7 +209,7 @@ class _ProfileSectionState extends State<ProfileSection> {
               title: const Text('Provider Not Enabled'),
               content: Text(
                 'The $provider provider is not enabled in Supabase Auth.\n\n'
-                'Please enable it in Supabase Dashboard → Authentication → Providers, then try again.'
+                'Please enable it in Supabase Dashboard → Authentication → Providers, then try again.',
               ),
               actions: [
                 TextButton(
@@ -197,10 +221,20 @@ class _ProfileSectionState extends State<ProfileSection> {
           );
         }
       } else {
-        if (mounted) ErrorHandler.handle(context, e, customMessage: 'Failed to connect $provider');
+        if (mounted)
+          ErrorHandler.handle(
+            context,
+            e,
+            customMessage: 'Failed to connect $provider',
+          );
       }
     } catch (e) {
-      if (mounted) ErrorHandler.handle(context, e, customMessage: 'Failed to connect $provider');
+      if (mounted)
+        ErrorHandler.handle(
+          context,
+          e,
+          customMessage: 'Failed to connect $provider',
+        );
     }
   }
 
@@ -211,10 +245,15 @@ class _ProfileSectionState extends State<ProfileSection> {
           .delete()
           .eq('provider', provider)
           .eq('user_id', _supabase.auth.currentUser!.id);
-      
+
       await _fetchData();
     } catch (e) {
-      if (mounted) ErrorHandler.handle(context, e, customMessage: 'Failed to disconnect $provider');
+      if (mounted)
+        ErrorHandler.handle(
+          context,
+          e,
+          customMessage: 'Failed to disconnect $provider',
+        );
     }
   }
 
@@ -222,13 +261,63 @@ class _ProfileSectionState extends State<ProfileSection> {
     try {
       await _supabase
           .from('connected_accounts')
-          .update({'metadata': {'channel_id': channelId}})
+          .update({
+            'metadata': {'channel_id': channelId},
+          })
           .eq('provider', 'discord')
           .eq('user_id', _supabase.auth.currentUser!.id);
-      
-      if (mounted) ErrorHandler.showSuccess(context, 'Discord settings updated');
+
+      if (mounted)
+        ErrorHandler.showSuccess(context, 'Discord settings updated');
     } catch (e) {
-      if (mounted) ErrorHandler.handle(context, e, customMessage: 'Failed to update Discord settings');
+      if (mounted)
+        ErrorHandler.handle(
+          context,
+          e,
+          customMessage: 'Failed to update Discord settings',
+        );
+    }
+  }
+
+  Future<void> _uploadPhoto() async {
+    final picker = ImagePicker();
+    final image = await picker.pickImage(source: ImageSource.gallery);
+    if (image == null) return;
+
+    setState(() => _isLoading = true);
+
+    try {
+      final user = _supabase.auth.currentUser;
+      if (user == null) return;
+
+      final imageExtension = image.path.split('.').last;
+      final imageBytes = await image.readAsBytes();
+      final userId = user.id;
+      final fileName =
+          '$userId/${DateTime.now().millisecondsSinceEpoch}.$imageExtension';
+
+      await _supabase.storage
+          .from('avatars')
+          .uploadBinary(
+            fileName,
+            imageBytes,
+            fileOptions: FileOptions(upsert: true, contentType: image.mimeType),
+          );
+
+      final imageUrl = _supabase.storage.from('avatars').getPublicUrl(fileName);
+
+      await _updateProfile({'avatar_url': imageUrl});
+
+      if (mounted) ErrorHandler.showSuccess(context, 'Profile photo updated');
+    } catch (e) {
+      if (mounted)
+        ErrorHandler.handle(
+          context,
+          e,
+          customMessage: 'Failed to upload photo',
+        );
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
@@ -242,24 +331,37 @@ class _ProfileSectionState extends State<ProfileSection> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('Your profile', style: theme.textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold)),
+        Text(
+          'Your profile',
+          style: theme.textTheme.headlineSmall?.copyWith(
+            fontWeight: FontWeight.bold,
+          ),
+        ),
         const SizedBox(height: 32),
-        
+
         // Profile Picture
         Row(
           children: [
-            const CircleAvatar(
+            CircleAvatar(
               radius: 40,
-              child: Icon(Icons.person, size: 40),
+              backgroundImage: _profile['avatar_url'] != null
+                  ? NetworkImage(_profile['avatar_url'])
+                  : null,
+              child: _profile['avatar_url'] == null
+                  ? const Icon(Icons.person, size: 40)
+                  : null,
             ),
             const SizedBox(width: 24),
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text('Upload your profile photo', style: TextStyle(fontWeight: FontWeight.bold)),
+                const Text(
+                  'Upload your profile photo',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
                 const SizedBox(height: 8),
                 FilledButton.tonal(
-                  onPressed: () {}, // Stub for now
+                  onPressed: _uploadPhoto,
                   child: const Text('Upload photo'),
                 ),
               ],
@@ -269,14 +371,16 @@ class _ProfileSectionState extends State<ProfileSection> {
         const SizedBox(height: 32),
 
         _buildEditableField(
-          context, 
-          'User\'s Name', 
-          _profile['full_name'] ?? user?.userMetadata?['full_name'] ?? 'Not set',
+          context,
+          'User\'s Name',
+          _profile['full_name'] ??
+              user?.userMetadata?['full_name'] ??
+              'Not set',
           _editName,
         ),
         _buildEditableField(
-          context, 
-          'User\'s Email address', 
+          context,
+          'User\'s Email address',
           user?.email ?? '',
           _editEmail,
         ),
@@ -286,18 +390,24 @@ class _ProfileSectionState extends State<ProfileSection> {
         DropdownButtonFormField<String>(
           value: _profile['language'] ?? 'English',
           decoration: const InputDecoration(border: OutlineInputBorder()),
-          items: ['English', 'Spanish', 'French', 'German']
-              .map((l) => DropdownMenuItem(value: l, child: Text(l)))
-              .toList(),
+          items: [
+            'English',
+            'Spanish',
+            'French',
+            'German',
+          ].map((l) => DropdownMenuItem(value: l, child: Text(l))).toList(),
           onChanged: (value) {
             if (value != null) _updateProfile({'language': value});
           },
         ),
         const SizedBox(height: 32),
 
-        const Text('Connected social accounts', style: TextStyle(fontWeight: FontWeight.bold)),
+        const Text(
+          'Connected social accounts',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
         const SizedBox(height: 16),
-        
+
         Column(
           children: [
             _SocialConnectTile(
@@ -326,22 +436,39 @@ class _ProfileSectionState extends State<ProfileSection> {
               connectedAt: _connections['discord']?['created_at'],
               onConnect: () => _connect('discord'),
               onDisconnect: () => _disconnect('discord'),
-              extraUI: _connections.containsKey('discord') 
-                ? _DiscordSettings(
-                    initialChannelId: _connections['discord']?['metadata']?['channel_id'] ?? '',
-                    onSave: _updateDiscordMetadata,
-                  )
-                : null,
+              extraUI: _connections.containsKey('discord')
+                  ? _DiscordSettings(
+                      initialChannelId:
+                          _connections['discord']?['metadata']?['channel_id'] ??
+                          '',
+                      onSave: _updateDiscordMetadata,
+                    )
+                  : null,
             ),
             const Divider(height: 32),
-            const Text('Coming Soon', style: TextStyle(color: Colors.grey, fontSize: 12)),
+            const Text(
+              'Coming Soon',
+              style: TextStyle(color: Colors.grey, fontSize: 12),
+            ),
             const SizedBox(height: 8),
             Wrap(
               spacing: 8,
-              children: ['YouTube', 'X.com', 'Twitch', 'Reddit', 'Telegram', 'WhatsApp'].map((s) => Chip(
-                label: Text(s, style: const TextStyle(fontSize: 12)),
-                backgroundColor: Colors.grey.withOpacity(0.1),
-              )).toList(),
+              children:
+                  [
+                        'YouTube',
+                        'X.com',
+                        'Twitch',
+                        'Reddit',
+                        'Telegram',
+                        'WhatsApp',
+                      ]
+                      .map(
+                        (s) => Chip(
+                          label: Text(s, style: const TextStyle(fontSize: 12)),
+                          backgroundColor: Colors.grey.withOpacity(0.1),
+                        ),
+                      )
+                      .toList(),
             ),
           ],
         ),
@@ -349,7 +476,12 @@ class _ProfileSectionState extends State<ProfileSection> {
     );
   }
 
-  Widget _buildEditableField(BuildContext context, String title, String value, VoidCallback onEdit) {
+  Widget _buildEditableField(
+    BuildContext context,
+    String title,
+    String value,
+    VoidCallback onEdit,
+  ) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 24.0),
       child: Column(
@@ -393,7 +525,7 @@ class _SocialConnectTile extends StatelessWidget {
 
   Widget _buildStatusIndicator(bool isConnected, String? connectedAt) {
     if (!isConnected) return const SizedBox.shrink();
-    
+
     return Padding(
       padding: const EdgeInsets.only(top: 4.0),
       child: Row(
@@ -429,10 +561,11 @@ class _SocialConnectTile extends StatelessWidget {
                   child: const Text('Connect'),
                 ),
         ),
-        if (extraUI != null) Padding(
-          padding: const EdgeInsets.only(left: 48.0, bottom: 16.0),
-          child: extraUI!,
-        ),
+        if (extraUI != null)
+          Padding(
+            padding: const EdgeInsets.only(left: 48.0, bottom: 16.0),
+            child: extraUI!,
+          ),
       ],
     );
   }
@@ -442,7 +575,10 @@ class _DiscordSettings extends StatefulWidget {
   final String initialChannelId;
   final Function(String) onSave;
 
-  const _DiscordSettings({required this.initialChannelId, required this.onSave});
+  const _DiscordSettings({
+    required this.initialChannelId,
+    required this.onSave,
+  });
 
   @override
   State<_DiscordSettings> createState() => _DiscordSettingsState();

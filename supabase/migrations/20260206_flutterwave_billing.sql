@@ -11,10 +11,10 @@ create table public.plans (
 
 -- Seed plans
 insert into public.plans (name, price_monthly, price_annual, features) values
-('O', 5, 3, ARRAY['Basic features', '1 user', 'Limited support']),
-('R', 15, 10, ARRAY['Advanced features', '5 users', 'Priority support']),
-('I', 25, 20, ARRAY['Pro features', 'Unlimited users', '24/7 support']),
-('N', 50, 45, ARRAY['Enterprise features', 'Custom analytics', 'Dedicated manager']),
+('O', 5, 36, ARRAY['Basic features', '1 user', 'Limited support']),
+('R', 15, 120, ARRAY['Advanced features', '5 users', 'Priority support']),
+('I', 25, 240, ARRAY['Pro features', 'Unlimited users', '24/7 support']),
+('N', 50, 540, ARRAY['Enterprise features', 'Custom analytics', 'Dedicated manager']),
 ('X', 0, 0, ARRAY['Custom solutions', 'Full white-label', 'On-premise option']); -- Custom pricing
 
 -- Create subscriptions table
