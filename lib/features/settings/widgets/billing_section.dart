@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:intl/intl.dart';
 import '../screens/plans_pricing_screen.dart';
+import '../../../core/state/team_context_controller.dart';
 
 class BillingSection extends StatefulWidget {
   const BillingSection({super.key});
@@ -24,13 +25,16 @@ class _BillingSectionState extends State<BillingSection> {
 
   Future<void> _fetchSubscription() async {
     try {
-      final user = _supabase.auth.currentUser;
-      if (user == null) return;
+      final teamId = TeamContextController.instance.teamId;
+      if (teamId == null) return;
 
       final subData = await _supabase
           .from('subscriptions')
           .select('*, plans(*)')
-          .eq('user_id', user.id)
+          .eq(
+            'team_id',
+            teamId,
+          ) // CHANGED: Filter by team_id instead of user_id
           .eq('status', 'active')
           .order('created_at', ascending: false)
           .maybeSingle();

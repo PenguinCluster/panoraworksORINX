@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:image_picker/image_picker.dart';
 import '../../auth/services/auth_service.dart';
 import '../../../core/utils/error_handler.dart';
 import '../../../core/state/profile_manager.dart';
+import '../../../core/state/team_context_controller.dart';
 
 class ProfileSection extends StatefulWidget {
   const ProfileSection({super.key});
@@ -15,25 +17,48 @@ class ProfileSection extends StatefulWidget {
 class _ProfileSectionState extends State<ProfileSection> {
   final _supabase = Supabase.instance.client;
   final _authService = AuthService();
+
   Map<String, dynamic> _connections = {};
   Map<String, dynamic> _profile = {};
   bool _isLoading = true;
 
+  // IMPORTANT: match your running web app URL + your router style (#/)
+  static const String _emailRedirectTo =
+      'http://127.0.0.1:7357/#/auth/callback';
+
   @override
   void initState() {
     super.initState();
+    // Check for password action after frame
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _checkSetPasswordAction();
+    });
     _fetchData();
+  }
+
+  void _checkSetPasswordAction() {
+    final state = GoRouterState.of(context);
+    if (state.uri.queryParameters['action'] == 'set_password') {
+      // Remove the query param to avoid re-triggering?
+      // Actually, keeping it is fine until they fix it,
+      // but usually we just show the prompt.
+      // Ideally we check profile.password_initialized too, but we might not have fetched it yet.
+      // So we'll rely on the prompt logic to check or just show it if requested.
+    }
   }
 
   Future<void> _fetchData() async {
     try {
       final user = _supabase.auth.currentUser;
-      if (user == null) return;
+      if (user == null) {
+        if (mounted) setState(() => _isLoading = false);
+        return;
+      }
 
       final responses = await Future.wait<dynamic>([
         _supabase
             .from('connected_accounts')
-            .select('provider, status, metadata'),
+            .select('provider, status, metadata, created_at'),
         _supabase.from('profiles').select().eq('id', user.id).maybeSingle(),
       ]);
 
@@ -70,23 +95,23 @@ class _ProfileSectionState extends State<ProfileSection> {
 
       await _supabase.from('profiles').update(updates).eq('id', user.id);
 
-      // Update local state
       setState(() {
         _profile = {..._profile, ...updates};
       });
 
-      // Refresh app-wide state
       await ProfileManager.instance.refreshProfile();
 
-      if (mounted)
+      if (mounted) {
         ErrorHandler.showSuccess(context, 'Profile updated successfully');
+      }
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         ErrorHandler.handle(
           context,
           e,
           customMessage: 'Failed to update profile',
         );
+      }
     }
   }
 
@@ -97,11 +122,13 @@ class _ProfileSectionState extends State<ProfileSection> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Edit Name'),
-        content: TextField(
-          controller: controller,
-          decoration: const InputDecoration(
-            labelText: 'Full Name',
-            border: OutlineInputBorder(),
+        content: SingleChildScrollView(
+          child: TextField(
+            controller: controller,
+            decoration: const InputDecoration(
+              labelText: 'Full Name',
+              border: OutlineInputBorder(),
+            ),
           ),
         ),
         actions: [
@@ -131,20 +158,22 @@ class _ProfileSectionState extends State<ProfileSection> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Edit Email'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text('You will need to verify your new email address.'),
-            const SizedBox(height: 16),
-            TextField(
-              controller: controller,
-              decoration: const InputDecoration(
-                labelText: 'New Email Address',
-                border: OutlineInputBorder(),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('You will need to verify your new email address.'),
+              const SizedBox(height: 16),
+              TextField(
+                controller: controller,
+                decoration: const InputDecoration(
+                  labelText: 'New Email Address',
+                  border: OutlineInputBorder(),
+                ),
+                keyboardType: TextInputType.emailAddress,
               ),
-              keyboardType: TextInputType.emailAddress,
-            ),
-          ],
+            ],
+          ),
         ),
         actions: [
           TextButton(
@@ -154,7 +183,8 @@ class _ProfileSectionState extends State<ProfileSection> {
           FilledButton(
             onPressed: () async {
               Navigator.pop(context);
-              if (controller.text.trim() != (user?.email ?? '')) {
+              if (controller.text.trim().isNotEmpty &&
+                  controller.text.trim() != (user?.email ?? '')) {
                 await _updateEmail(controller.text.trim());
               }
             },
@@ -167,20 +197,36 @@ class _ProfileSectionState extends State<ProfileSection> {
 
   Future<void> _updateEmail(String newEmail) async {
     try {
-      await _supabase.auth.updateUser(UserAttributes(email: newEmail));
+      final user = _supabase.auth.currentUser;
+      if (user == null) {
+        if (mounted) ErrorHandler.handle(context, 'Not logged in');
+        return;
+      }
+
+      // Optional: refresh session before sensitive change
+      await _supabase.auth.refreshSession();
+
+      // Key: force redirect back to your actual app route
+      await _supabase.auth.updateUser(
+        UserAttributes(email: newEmail),
+        emailRedirectTo: _emailRedirectTo,
+      );
+
       if (mounted) {
         ErrorHandler.showSuccess(
           context,
-          'Confirmation email sent to $newEmail',
+          'Email confirmation sent. Check your inbox. '
+          'Depending on Supabase security settings, it may send to BOTH old + new emails.',
         );
       }
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         ErrorHandler.handle(
           context,
           e,
           customMessage: 'Failed to update email',
         );
+      }
     }
   }
 
@@ -221,20 +267,22 @@ class _ProfileSectionState extends State<ProfileSection> {
           );
         }
       } else {
-        if (mounted)
+        if (mounted) {
           ErrorHandler.handle(
             context,
             e,
             customMessage: 'Failed to connect $provider',
           );
+        }
       }
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         ErrorHandler.handle(
           context,
           e,
           customMessage: 'Failed to connect $provider',
         );
+      }
     }
   }
 
@@ -248,12 +296,13 @@ class _ProfileSectionState extends State<ProfileSection> {
 
       await _fetchData();
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         ErrorHandler.handle(
           context,
           e,
           customMessage: 'Failed to disconnect $provider',
         );
+      }
     }
   }
 
@@ -270,12 +319,13 @@ class _ProfileSectionState extends State<ProfileSection> {
       if (mounted)
         ErrorHandler.showSuccess(context, 'Discord settings updated');
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         ErrorHandler.handle(
           context,
           e,
           customMessage: 'Failed to update Discord settings',
         );
+      }
     }
   }
 
@@ -310,14 +360,113 @@ class _ProfileSectionState extends State<ProfileSection> {
 
       if (mounted) ErrorHandler.showSuccess(context, 'Profile photo updated');
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         ErrorHandler.handle(
           context,
           e,
           customMessage: 'Failed to upload photo',
         );
+      }
     } finally {
       if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  // --- Password Initialization Logic ---
+
+  Future<void> _setPassword() async {
+    final passwordController = TextEditingController();
+    final confirmController = TextEditingController();
+
+    await showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Text('Set Your Password'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('Please set a secure password for your account.'),
+              const SizedBox(height: 16),
+              TextField(
+                controller: passwordController,
+                decoration: const InputDecoration(labelText: 'Password'),
+                obscureText: true,
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: confirmController,
+                decoration: const InputDecoration(
+                  labelText: 'Confirm Password',
+                ),
+                obscureText: true,
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              if (passwordController.text != confirmController.text) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Passwords do not match')),
+                );
+                return;
+              }
+              if (passwordController.text.length < 6) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Password too short (min 6 chars)'),
+                  ),
+                );
+                return;
+              }
+
+              Navigator.pop(context);
+              await _updateUserPassword(passwordController.text);
+            },
+            child: const Text('Set Password'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _updateUserPassword(String newPassword) async {
+    try {
+      await _supabase.auth.updateUser(UserAttributes(password: newPassword));
+
+      // Update profile status locally and remotely
+      await _supabase.rpc('mark_password_initialized');
+      setState(() {
+        _profile['password_initialized'] = true;
+      });
+
+      if (mounted) {
+        ErrorHandler.showSuccess(context, 'Password set successfully!');
+
+        // Clear the query param if present
+        final router = GoRouter.of(context);
+        if (router.routeInformationProvider.value.uri.queryParameters
+            .containsKey('action')) {
+          // We can't easily strip just one param without full navigation,
+          // but we can replace current route to clean URL
+          context.go('/app/settings/profile');
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ErrorHandler.handle(
+          context,
+          e,
+          customMessage: 'Failed to set password',
+        );
+      }
     }
   }
 
@@ -325,154 +474,268 @@ class _ProfileSectionState extends State<ProfileSection> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final user = _supabase.auth.currentUser;
+    final isSmallScreen = MediaQuery.of(context).size.width < 600;
 
     if (_isLoading) return const Center(child: CircularProgressIndicator());
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          'Your profile',
-          style: theme.textTheme.headlineSmall?.copyWith(
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-        const SizedBox(height: 32),
+    // Check if we need to show the password prompt card
+    // 1. Explicit action=set_password in URL
+    // 2. OR password_initialized is false (and user is not anonymous)
+    final needsPassword = (_profile['password_initialized'] == false);
+    final isSetPasswordAction =
+        GoRouterState.of(context).uri.queryParameters['action'] ==
+        'set_password';
 
-        // Profile Picture
-        Row(
+    return ListenableBuilder(
+      listenable: TeamContextController.instance,
+      builder: (context, _) {
+        final controller = TeamContextController.instance;
+        final canViewConnectedAccounts = controller.canViewConnectedAccounts;
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            CircleAvatar(
-              radius: 40,
-              backgroundImage: _profile['avatar_url'] != null
-                  ? NetworkImage(_profile['avatar_url'])
-                  : null,
-              child: _profile['avatar_url'] == null
-                  ? const Icon(Icons.person, size: 40)
-                  : null,
+            Text(
+              'Your profile',
+              style: theme.textTheme.headlineSmall?.copyWith(
+                fontWeight: FontWeight.bold,
+              ),
             ),
-            const SizedBox(width: 24),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Upload your profile photo',
-                  style: TextStyle(fontWeight: FontWeight.bold),
+            const SizedBox(height: 32),
+
+            // --- Password Setup Prompt ---
+            if (needsPassword || isSetPasswordAction)
+              Container(
+                margin: const EdgeInsets.only(bottom: 32),
+                padding: const EdgeInsets.all(24),
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.primaryContainer.withOpacity(0.3),
+                  border: Border.all(color: theme.colorScheme.primary),
+                  borderRadius: BorderRadius.circular(12),
                 ),
-                const SizedBox(height: 8),
-                FilledButton.tonal(
-                  onPressed: _uploadPhoto,
-                  child: const Text('Upload photo'),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(
+                          Icons.lock_reset,
+                          color: theme.colorScheme.primary,
+                          size: 28,
+                        ),
+                        const SizedBox(width: 12),
+                        Text(
+                          'Finish Account Setup',
+                          style: theme.textTheme.titleMedium?.copyWith(
+                            fontWeight: FontWeight.bold,
+                            color: theme.colorScheme.primary,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    const Text(
+                      'You joined via an invite link. Please set a password to ensure you can log in directly next time.',
+                    ),
+                    const SizedBox(height: 16),
+                    FilledButton(
+                      onPressed: _setPassword,
+                      child: const Text('Set Password Now'),
+                    ),
+                  ],
                 ),
-              ],
-            ),
-          ],
-        ),
-        const SizedBox(height: 32),
+              ),
 
-        _buildEditableField(
-          context,
-          'User\'s Name',
-          _profile['full_name'] ??
-              user?.userMetadata?['full_name'] ??
-              'Not set',
-          _editName,
-        ),
-        _buildEditableField(
-          context,
-          'User\'s Email address',
-          user?.email ?? '',
-          _editEmail,
-        ),
+            // -----------------------------
+            // Responsive Header
+            if (isSmallScreen)
+              Center(
+                child: Column(
+                  children: [
+                    CircleAvatar(
+                      radius: 40,
+                      backgroundImage: _profile['avatar_url'] != null
+                          ? NetworkImage(_profile['avatar_url'])
+                          : null,
+                      child: _profile['avatar_url'] == null
+                          ? const Icon(Icons.person, size: 40)
+                          : null,
+                    ),
+                    const SizedBox(height: 16),
+                    FilledButton.tonal(
+                      onPressed: _uploadPhoto,
+                      child: const Text('Upload photo'),
+                    ),
+                  ],
+                ),
+              )
+            else
+              Row(
+                children: [
+                  CircleAvatar(
+                    radius: 40,
+                    backgroundImage: _profile['avatar_url'] != null
+                        ? NetworkImage(_profile['avatar_url'])
+                        : null,
+                    child: _profile['avatar_url'] == null
+                        ? const Icon(Icons.person, size: 40)
+                        : null,
+                  ),
+                  const SizedBox(width: 24),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Upload your profile photo',
+                        style: TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                      const SizedBox(height: 8),
+                      FilledButton.tonal(
+                        onPressed: _uploadPhoto,
+                        child: const Text('Upload photo'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
 
-        const Text('Language', style: TextStyle(fontWeight: FontWeight.bold)),
-        const SizedBox(height: 8),
-        DropdownButtonFormField<String>(
-          value: _profile['language'] ?? 'English',
-          decoration: const InputDecoration(border: OutlineInputBorder()),
-          items: [
-            'English',
-            'Spanish',
-            'French',
-            'German',
-          ].map((l) => DropdownMenuItem(value: l, child: Text(l))).toList(),
-          onChanged: (value) {
-            if (value != null) _updateProfile({'language': value});
-          },
-        ),
-        const SizedBox(height: 32),
+            const SizedBox(height: 32),
 
-        const Text(
-          'Connected social accounts',
-          style: TextStyle(fontWeight: FontWeight.bold),
-        ),
-        const SizedBox(height: 16),
+            _buildEditableField(
+              context,
+              'User\'s Name',
+              _profile['full_name'] ??
+                  user?.userMetadata?['full_name'] ??
+                  'Not set',
+              _editName,
+            ),
+            _buildEditableField(
+              context,
+              'User\'s Email address',
+              user?.email ?? '',
+              _editEmail,
+            ),
 
-        Column(
-          children: [
-            _SocialConnectTile(
-              provider: 'facebook',
-              label: 'Facebook',
-              icon: Icons.facebook,
-              isConnected: _connections.containsKey('facebook'),
-              connectedAt: _connections['facebook']?['created_at'],
-              onConnect: () => _connect('facebook'),
-              onDisconnect: () => _disconnect('facebook'),
-            ),
-            _SocialConnectTile(
-              provider: 'tiktok',
-              label: 'TikTok',
-              icon: Icons.music_note,
-              isConnected: _connections.containsKey('tiktok'),
-              connectedAt: _connections['tiktok']?['created_at'],
-              onConnect: () => _connect('tiktok'),
-              onDisconnect: () => _disconnect('tiktok'),
-            ),
-            _SocialConnectTile(
-              provider: 'discord',
-              label: 'Discord',
-              icon: Icons.discord,
-              isConnected: _connections.containsKey('discord'),
-              connectedAt: _connections['discord']?['created_at'],
-              onConnect: () => _connect('discord'),
-              onDisconnect: () => _disconnect('discord'),
-              extraUI: _connections.containsKey('discord')
-                  ? _DiscordSettings(
-                      initialChannelId:
-                          _connections['discord']?['metadata']?['channel_id'] ??
-                          '',
-                      onSave: _updateDiscordMetadata,
-                    )
-                  : null,
-            ),
-            const Divider(height: 32),
             const Text(
-              'Coming Soon',
-              style: TextStyle(color: Colors.grey, fontSize: 12),
+              'Language',
+              style: TextStyle(fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              children:
-                  [
-                        'YouTube',
-                        'X.com',
-                        'Twitch',
-                        'Reddit',
-                        'Telegram',
-                        'WhatsApp',
-                      ]
-                      .map(
-                        (s) => Chip(
-                          label: Text(s, style: const TextStyle(fontSize: 12)),
-                          backgroundColor: Colors.grey.withOpacity(0.1),
-                        ),
-                      )
-                      .toList(),
+            DropdownButtonFormField<String>(
+              value: _profile['language'] ?? 'English',
+              decoration: const InputDecoration(border: OutlineInputBorder()),
+              items: [
+                'English',
+                'Spanish',
+                'French',
+                'German',
+              ].map((l) => DropdownMenuItem(value: l, child: Text(l))).toList(),
+              onChanged: (value) {
+                if (value != null) _updateProfile({'language': value});
+              },
             ),
+
+            // Connected Accounts: OWNER ONLY
+            if (canViewConnectedAccounts) ...[
+              const SizedBox(height: 32),
+              const Text(
+                'Connected social accounts',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 16),
+              Column(
+                children: [
+                  _SocialConnectTile(
+                    provider: 'facebook',
+                    label: 'Facebook',
+                    icon: Icons.facebook,
+                    isConnected: _connections.containsKey('facebook'),
+                    connectedAt: _connections['facebook']?['created_at'],
+                    onConnect: () => _connect('facebook'),
+                    onDisconnect: () => _disconnect('facebook'),
+                  ),
+                  _SocialConnectTile(
+                    provider: 'tiktok',
+                    label: 'TikTok',
+                    icon: Icons.music_note,
+                    isConnected: _connections.containsKey('tiktok'),
+                    connectedAt: _connections['tiktok']?['created_at'],
+                    onConnect: () => _connect('tiktok'),
+                    onDisconnect: () => _disconnect('tiktok'),
+                  ),
+                  _SocialConnectTile(
+                    provider: 'discord',
+                    label: 'Discord',
+                    icon: Icons.discord,
+                    isConnected: _connections.containsKey('discord'),
+                    connectedAt: _connections['discord']?['created_at'],
+                    onConnect: () => _connect('discord'),
+                    onDisconnect: () => _disconnect('discord'),
+                    extraUI: _connections.containsKey('discord')
+                        ? _DiscordSettings(
+                            initialChannelId:
+                                _connections['discord']?['metadata']?['channel_id'] ??
+                                '',
+                            onSave: _updateDiscordMetadata,
+                          )
+                        : null,
+                  ),
+                  const Divider(height: 32),
+                  const Text(
+                    'Coming Soon',
+                    style: TextStyle(color: Colors.grey, fontSize: 12),
+                  ),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    children:
+                        [
+                              'YouTube',
+                              'X.com',
+                              'Twitch',
+                              'Reddit',
+                              'Telegram',
+                              'WhatsApp',
+                            ]
+                            .map(
+                              (s) => Chip(
+                                label: Text(
+                                  s,
+                                  style: const TextStyle(fontSize: 12),
+                                ),
+                                backgroundColor: Colors.grey.withOpacity(0.1),
+                              ),
+                            )
+                            .toList(),
+                  ),
+                ],
+              ),
+            ] else ...[
+              // Non-owner view hint
+              const SizedBox(height: 32),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.surfaceVariant.withOpacity(0.5),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.info_outline, size: 20),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        'Workspace integrations and connected accounts are managed by the Workspace Owner.',
+                        style: theme.textTheme.bodySmall,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ],
-        ),
-      ],
+        );
+      },
     );
   }
 

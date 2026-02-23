@@ -1,13 +1,14 @@
-import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:orinx/features/auth/screens/auth_callback_page.dart'
+    show AuthCallbackPage;
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../features/home/screens/home_screen.dart';
 import '../../features/auth/screens/login_screen.dart';
 import '../../features/auth/screens/signup_screen.dart';
 import '../../features/auth/screens/forgot_password_screen.dart';
 import '../../features/auth/screens/join_team_screen.dart';
+import '../../features/auth/screens/set_password_screen.dart';
 import '../../features/dashboard/screens/app_shell.dart';
-import '../../features/dashboard/screens/placeholder_screen.dart';
 import '../../features/settings/screens/settings_screen.dart';
 import '../../features/settings/screens/plans_pricing_screen.dart';
 import '../../features/settings/screens/get_app_screen.dart';
@@ -23,20 +24,63 @@ final appRouter = GoRouter(
   initialLocation: '/',
   redirect: (context, state) {
     final session = Supabase.instance.client.auth.currentSession;
-    final isLoggingIn =
-        state.matchedLocation == '/login' ||
-        state.matchedLocation == '/signup' ||
-        state.matchedLocation == '/forgot-password';
+    final location = state.matchedLocation;
+    final fullUri = state.uri;
+
+    String? sanitizeNext(String? next) {
+      if (next == null) return null;
+      final trimmed = next.trim();
+      if (trimmed.isEmpty) return null;
+      if (trimmed.startsWith('/')) return trimmed;
+      if (trimmed.startsWith('#/')) return trimmed.substring(1);
+      if (trimmed.startsWith('/#/')) return trimmed.substring(2);
+      return null;
+    }
+
+    String loginWithNext(Uri nextUri) {
+      return '/login?next=${Uri.encodeComponent(nextUri.toString())}';
+    }
+
+    // Public routes that don't require auth
+    final isPublicRoute =
+        location == '/' ||
+        location == '/login' ||
+        location == '/signup' ||
+        location == '/forgot-password' ||
+        location == '/auth/callback' ||
+        location == '/join-team' ||
+        location == '/set-password';
+
+    // Invite onboarding must never be wrapped into /login by the router guard.
+    if (location.contains('set-password') ||
+        location.contains('join-team') ||
+        location.contains('auth/callback')) {
+      return null;
+    }
 
     if (session == null) {
-      if (state.matchedLocation.startsWith('/app')) {
-        return '/login';
+      // If not logged in and trying to access protected route (like /app/*)
+      if (!isPublicRoute && location.startsWith('/app')) {
+        return loginWithNext(fullUri);
       }
     } else {
-      if (isLoggingIn) {
-        return '/app/overview';
+      // If logged in
+
+      // Prevent infinite redirect loops if already on target pages
+      if (location == '/app/overview' || location == '/set-password') {
+        return null;
       }
-      if (state.matchedLocation == '/app') {
+
+      // If user is on login/signup pages, push them into app
+      if (location == '/login' ||
+          location == '/signup' ||
+          location == '/forgot-password') {
+        final next = sanitizeNext(fullUri.queryParameters['next']);
+        return next ?? '/app/overview';
+      }
+
+      // If root /app is hit, redirect to overview
+      if (location == '/app') {
         return '/app/overview';
       }
     }
@@ -44,11 +88,34 @@ final appRouter = GoRouter(
   },
   routes: [
     GoRoute(path: '/', builder: (context, state) => const HomeScreen()),
-    GoRoute(path: '/login', builder: (context, state) => const LoginScreen()),
-    GoRoute(path: '/signup', builder: (context, state) => const SignupScreen()),
+    GoRoute(
+      path: '/login',
+      builder: (context, state) {
+        final next = state.uri.queryParameters['next'];
+        return LoginScreen(next: next);
+      },
+    ),
+    GoRoute(
+      path: '/signup',
+      builder: (context, state) {
+        final next = state.uri.queryParameters['next'];
+        return SignupScreen(next: next);
+      },
+    ),
     GoRoute(
       path: '/forgot-password',
       builder: (context, state) => const ForgotPasswordScreen(),
+    ),
+    GoRoute(
+      path: '/set-password',
+      builder: (context, state) {
+        final next = state.uri.queryParameters['next'];
+        return SetPasswordScreen(next: next);
+      },
+    ),
+    GoRoute(
+      path: '/auth/callback',
+      builder: (context, state) => const AuthCallbackPage(),
     ),
     GoRoute(
       path: '/join-team',

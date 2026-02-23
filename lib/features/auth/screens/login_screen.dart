@@ -5,7 +5,9 @@ import '../../../shared/widgets/oauth_buttons.dart';
 import '../../../core/utils/error_handler.dart';
 
 class LoginScreen extends StatefulWidget {
-  const LoginScreen({super.key});
+  final String? next;
+
+  const LoginScreen({super.key, this.next});
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
@@ -25,6 +27,25 @@ class _LoginScreenState extends State<LoginScreen> {
     super.dispose();
   }
 
+  String? _sanitizeNext(String? raw) {
+    if (raw == null) return null;
+    final next = raw.trim();
+    if (next.isEmpty) return null;
+
+    // Only allow internal navigation
+    if (!next.startsWith('/')) return null;
+
+    // Prevent redirect loops back to auth pages
+    if (next.startsWith('/login') ||
+        next.startsWith('/signup') ||
+        next.startsWith('/forgot-password') ||
+        next.startsWith('/auth/callback')) {
+      return null;
+    }
+
+    return next;
+  }
+
   Future<void> _login() async {
     if (!_formKey.currentState!.validate()) return;
 
@@ -34,8 +55,15 @@ class _LoginScreenState extends State<LoginScreen> {
         email: _emailController.text.trim(),
         password: _passwordController.text.trim(),
       );
-      if (mounted) {
-        ErrorHandler.showSuccess(context, 'Login successful');
+
+      if (!mounted) return;
+
+      ErrorHandler.showSuccess(context, 'Login successful');
+
+      final dest = _sanitizeNext(widget.next);
+      if (dest != null) {
+        context.go(dest);
+      } else {
         context.go('/app/overview');
       }
     } catch (e) {
@@ -79,7 +107,9 @@ class _LoginScreenState extends State<LoginScreen> {
                     ),
                     keyboardType: TextInputType.emailAddress,
                     validator: (value) {
-                      if (value == null || value.isEmpty) return 'Please enter your email';
+                      if (value == null || value.isEmpty) {
+                        return 'Please enter your email';
+                      }
                       if (!value.contains('@')) return 'Please enter a valid email';
                       return null;
                     },
@@ -94,7 +124,9 @@ class _LoginScreenState extends State<LoginScreen> {
                     ),
                     obscureText: true,
                     validator: (value) {
-                      if (value == null || value.isEmpty) return 'Please enter your password';
+                      if (value == null || value.isEmpty) {
+                        return 'Please enter your password';
+                      }
                       return null;
                     },
                   ),
@@ -113,13 +145,23 @@ class _LoginScreenState extends State<LoginScreen> {
                         ? const SizedBox(
                             height: 20,
                             width: 20,
-                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
                           )
                         : const Text('Login'),
                   ),
                   const SizedBox(height: 16),
                   TextButton(
-                    onPressed: () => context.push('/signup'),
+                    onPressed: () {
+                      final next = _sanitizeNext(widget.next);
+                      if (next != null) {
+                        context.push('/signup?next=${Uri.encodeComponent(next)}');
+                      } else {
+                        context.push('/signup');
+                      }
+                    },
                     child: const Text('Don\'t have an account? Sign Up'),
                   ),
                   const SizedBox(height: 32),

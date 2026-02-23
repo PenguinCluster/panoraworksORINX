@@ -6,7 +6,9 @@ import '../../../shared/widgets/oauth_buttons.dart';
 import '../../../core/utils/error_handler.dart';
 
 class SignupScreen extends StatefulWidget {
-  const SignupScreen({super.key});
+  final String? next;
+
+  const SignupScreen({super.key, this.next});
 
   @override
   State<SignupScreen> createState() => _SignupScreenState();
@@ -31,6 +33,25 @@ class _SignupScreenState extends State<SignupScreen> {
     super.dispose();
   }
 
+  String? _sanitizeNext(String? raw) {
+    if (raw == null) return null;
+    final next = raw.trim();
+    if (next.isEmpty) return null;
+
+    // Only allow internal navigation
+    if (!next.startsWith('/')) return null;
+
+    // Prevent loops back into auth pages
+    if (next.startsWith('/login') ||
+        next.startsWith('/signup') ||
+        next.startsWith('/forgot-password') ||
+        next.startsWith('/auth/callback')) {
+      return null;
+    }
+
+    return next;
+  }
+
   Future<void> _checkEmailLockAndSignup() async {
     if (!_formKey.currentState!.validate()) return;
 
@@ -38,13 +59,14 @@ class _SignupScreenState extends State<SignupScreen> {
     final email = _emailController.text.trim();
 
     try {
-      // 1. Check Email Lock via DB Function
+      // 1) Check Email Lock via DB Function
+      // Returns JSON: { locked: bool, team_id: uuid, status: text, source: text }
       final lockResult = await _supabase.rpc(
         'check_email_lock',
         params: {'check_email': email},
       );
 
-      // 2. Handle Lock
+      // 2) Handle Lock (invited emails must join via invite link)
       if (lockResult != null && lockResult['locked'] == true) {
         if (mounted) {
           showDialog(
@@ -69,18 +91,25 @@ class _SignupScreenState extends State<SignupScreen> {
         return;
       }
 
-      // 3. Proceed with standard signup if not locked
+      // 3) Proceed with standard signup if not locked
       await _authService.signUp(
         email: email,
         password: _passwordController.text.trim(),
         username: _usernameController.text.trim(),
       );
 
-      if (mounted) {
-        ErrorHandler.showSuccess(
-          context,
-          'Verification email sent! Please check your inbox.',
-        );
+      if (!mounted) return;
+
+      ErrorHandler.showSuccess(
+        context,
+        'Verification email sent! Please check your inbox.',
+      );
+
+      // 4) Preserve next (invite flow) by sending user to login with next param
+      final dest = _sanitizeNext(widget.next);
+      if (dest != null) {
+        context.go('/login?next=${Uri.encodeComponent(dest)}');
+      } else {
         context.go('/login');
       }
     } catch (e) {
@@ -94,6 +123,8 @@ class _SignupScreenState extends State<SignupScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final dest = _sanitizeNext(widget.next);
+
     return Scaffold(
       appBar: AppBar(title: const Text('Sign Up')),
       body: Center(
@@ -110,8 +141,8 @@ class _SignupScreenState extends State<SignupScreen> {
                   Text(
                     'Create Account',
                     style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                      fontWeight: FontWeight.bold,
-                    ),
+                          fontWeight: FontWeight.bold,
+                        ),
                     textAlign: TextAlign.center,
                   ),
                   const SizedBox(height: 32),
@@ -124,10 +155,12 @@ class _SignupScreenState extends State<SignupScreen> {
                     ),
                     keyboardType: TextInputType.emailAddress,
                     validator: (value) {
-                      if (value == null || value.isEmpty)
+                      if (value == null || value.isEmpty) {
                         return 'Please enter your email';
-                      if (!value.contains('@'))
+                      }
+                      if (!value.contains('@')) {
                         return 'Please enter a valid email';
+                      }
                       return null;
                     },
                   ),
@@ -140,10 +173,12 @@ class _SignupScreenState extends State<SignupScreen> {
                       prefixIcon: Icon(Icons.person),
                     ),
                     validator: (value) {
-                      if (value == null || value.isEmpty)
+                      if (value == null || value.isEmpty) {
                         return 'Please enter a username';
-                      if (value.length < 3)
+                      }
+                      if (value.length < 3) {
                         return 'Username must be at least 3 characters';
+                      }
                       return null;
                     },
                   ),
@@ -157,10 +192,12 @@ class _SignupScreenState extends State<SignupScreen> {
                     ),
                     obscureText: true,
                     validator: (value) {
-                      if (value == null || value.isEmpty)
+                      if (value == null || value.isEmpty) {
                         return 'Please enter your password';
-                      if (value.length < 6)
+                      }
+                      if (value.length < 6) {
                         return 'Password must be at least 6 characters';
+                      }
                       return null;
                     },
                   ),
@@ -174,8 +211,9 @@ class _SignupScreenState extends State<SignupScreen> {
                     ),
                     obscureText: true,
                     validator: (value) {
-                      if (value != _passwordController.text)
+                      if (value != _passwordController.text) {
                         return 'Passwords do not match';
+                      }
                       return null;
                     },
                   ),
@@ -195,7 +233,13 @@ class _SignupScreenState extends State<SignupScreen> {
                   ),
                   const SizedBox(height: 16),
                   TextButton(
-                    onPressed: () => context.push('/login'),
+                    onPressed: () {
+                      if (dest != null) {
+                        context.push('/login?next=${Uri.encodeComponent(dest)}');
+                      } else {
+                        context.push('/login');
+                      }
+                    },
                     child: const Text('Already have an account? Login'),
                   ),
                   const SizedBox(height: 32),

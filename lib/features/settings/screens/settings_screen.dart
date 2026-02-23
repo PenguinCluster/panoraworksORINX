@@ -1,13 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
-import '../../../core/auth/services/permission_service.dart';
 import '../widgets/profile_section.dart';
 import '../widgets/login_section.dart';
 import '../widgets/accessibility_section.dart';
 import '../widgets/team_section.dart';
 import '../widgets/billing_section.dart';
 import '../widgets/orders_section.dart';
+import '../../../core/state/team_context_controller.dart';
 
 class SettingsScreen extends StatefulWidget {
   final String initialTab;
@@ -19,9 +18,6 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   late int _selectedIndex;
-  bool _isLoading = true;
-  final _supabase = Supabase.instance.client;
-  String _userRole = 'none';
 
   final List<String> _allSections = [
     'Your profile',
@@ -41,66 +37,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     'orders',
   ];
 
-  // Dynamically filtered lists based on permissions
-  List<String> _visibleSections = [];
-  List<String> _visibleSlugs = [];
-
   @override
   void initState() {
     super.initState();
-    _checkPermissions();
-  }
-
-  Future<void> _checkPermissions() async {
-    // 1. Fetch Role
-    final user = _supabase.auth.currentUser;
-    if (user != null) {
-      // Logic duplicated from PermissionService for local state,
-      // or we could expose getRole from service.
-      // Let's rely on a quick check here to filter UI.
-      final memberRes = await _supabase
-          .from('team_members')
-          .select('role')
-          .eq('user_id', user.id)
-          .eq('status', 'active')
-          .maybeSingle();
-
-      if (memberRes != null) {
-        _userRole = memberRes['role'];
-      } else {
-        // Owner check
-        final teamRes = await _supabase
-            .from('teams')
-            .select('id')
-            .eq('owner_id', user.id)
-            .maybeSingle();
-        if (teamRes != null) _userRole = 'owner';
-      }
-    }
-
-    // 2. Filter Sections
-    _visibleSections.clear();
-    _visibleSlugs.clear();
-
-    for (int i = 0; i < _allSlugs.length; i++) {
-      final slug = _allSlugs[i];
-      // Managers blocked from Team, Billing, Orders
-      // Unless we implement fine-grained "admin toggle" later.
-      if (_userRole == 'manager' &&
-          (slug == 'team' || slug == 'billing' || slug == 'orders')) {
-        continue;
-      }
-      _visibleSections.add(_allSections[i]);
-      _visibleSlugs.add(slug);
-    }
-
-    // 3. Set Initial Tab
-    if (mounted) {
-      setState(() {
-        _isLoading = false;
-        _updateIndexFromTab(widget.initialTab);
-      });
-    }
+    _updateIndexFromTab(widget.initialTab);
   }
 
   @override
@@ -112,18 +52,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   void _updateIndexFromTab(String tab) {
-    // If tab is not visible/allowed, default to profile
-    if (!_visibleSlugs.contains(tab)) {
-      if (_visibleSlugs.isNotEmpty) {
-        _selectedIndex = 0;
-        // Optionally redirect URL to valid slug?
-      } else {
-        _selectedIndex = 0;
-      }
-      return;
-    }
-
-    final index = _visibleSlugs.indexOf(tab);
+    final index = _allSlugs.indexOf(tab);
     setState(() {
       _selectedIndex = index != -1 ? index : 0;
     });
@@ -131,14 +60,33 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   void _onSectionSelected(int index) {
     setState(() => _selectedIndex = index);
-    context.go('/app/settings/${_visibleSlugs[index]}');
+    context.go('/app/settings/${_allSlugs[index]}');
   }
 
-  Widget _buildContent() {
-    if (_isLoading) return const Center(child: CircularProgressIndicator());
-    if (_visibleSlugs.isEmpty) return const SizedBox.shrink();
+  bool _isSectionEnabled(String slug) {
+    final controller = TeamContextController.instance;
 
-    final currentSlug = _visibleSlugs[_selectedIndex];
+    // Use centralized RBAC checks
+    switch (slug) {
+      case 'profile':
+        return controller.canAccessProfileTab;
+      case 'login':
+        return controller.canAccessLoginTab;
+      case 'accessibility':
+        return controller.canAccessAccessibilityTab;
+      case 'team':
+        return controller.canAccessTeamTab;
+      case 'billing':
+        return controller.canAccessBillingTab;
+      case 'orders':
+        return controller.canAccessOrdersTab;
+      default:
+        return false;
+    }
+  }
+
+  Widget _buildContent(int index) {
+    final currentSlug = _allSlugs[index];
 
     switch (currentSlug) {
       case 'profile':
@@ -181,55 +129,85 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget build(BuildContext context) {
     final isDesktop = MediaQuery.of(context).size.width > 900;
 
-    if (_isLoading) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
-    }
+    return ListenableBuilder(
+      listenable: TeamContextController.instance,
+      builder: (context, _) {
+        final controller = TeamContextController.instance;
 
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Settings'),
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          onPressed: () => context.go('/app/overview'),
-        ),
-        actions: [_HelpAndResourcesButton()],
-      ),
-      body: Row(
-        children: [
-          // Sidebar
-          Container(
-            width: isDesktop ? 280 : 80,
-            decoration: BoxDecoration(
-              border: Border(
-                right: BorderSide(color: Theme.of(context).dividerColor),
-              ),
+        // If context is still loading, show loading.
+        // Or if we don't have a role yet (and assume we need one).
+        if (controller.isLoading && controller.role == null) {
+          return const Scaffold(
+            body: Center(child: CircularProgressIndicator()),
+          );
+        }
+
+        return Scaffold(
+          appBar: AppBar(
+            title: const Text('Settings'),
+            leading: IconButton(
+              icon: const Icon(Icons.arrow_back),
+              onPressed: () => context.go('/app/overview'),
             ),
-            child: ListView.builder(
-              itemCount: _visibleSections.length,
-              itemBuilder: (context, index) {
-                final isSelected = _selectedIndex == index;
-                final slug = _visibleSlugs[index];
-                return ListTile(
-                  selected: isSelected,
-                  leading: _getIconForSlug(slug),
-                  title: isDesktop ? Text(_visibleSections[index]) : null,
-                  onTap: () => _onSectionSelected(index),
-                );
-              },
-            ),
+            actions: [_HelpAndResourcesButton()],
           ),
-          // Content
-          Expanded(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(32.0),
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 800),
-                child: _buildContent(),
-              ),
-            ),
+          body: Builder(
+            builder: (context) {
+              // Safety check: If current tab is disabled for this role, fallback to Profile
+              int effectiveIndex = _selectedIndex;
+              final currentSlug = _allSlugs[effectiveIndex];
+
+              if (!_isSectionEnabled(currentSlug)) {
+                effectiveIndex = 0; // Default to Profile
+              }
+
+              return Row(
+                children: [
+                  // Sidebar
+                  Container(
+                    width: isDesktop ? 280 : 80,
+                    decoration: BoxDecoration(
+                      border: Border(
+                        right: BorderSide(
+                          color: Theme.of(context).dividerColor,
+                        ),
+                      ),
+                    ),
+                    child: ListView.builder(
+                      itemCount: _allSections.length,
+                      itemBuilder: (context, index) {
+                        final slug = _allSlugs[index];
+                        final isEnabled = _isSectionEnabled(slug);
+                        final isSelected = effectiveIndex == index;
+
+                        return ListTile(
+                          selected: isSelected,
+                          enabled: isEnabled,
+                          leading: _getIconForSlug(slug),
+                          title: isDesktop ? Text(_allSections[index]) : null,
+                          onTap: isEnabled
+                              ? () => _onSectionSelected(index)
+                              : null,
+                        );
+                      },
+                    ),
+                  ),
+                  // Content
+                  Expanded(
+                    child: SingleChildScrollView(
+                      padding: EdgeInsets.all(isDesktop ? 32.0 : 16.0),
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 800),
+                        child: _buildContent(effectiveIndex),
+                      ),
+                    ),
+                  ),
+                ],
+              );
+            },
           ),
-        ],
-      ),
+        );
+      },
     );
   }
 }

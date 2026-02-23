@@ -3,9 +3,41 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'core/config/supabase_config.dart';
 import 'core/routing/app_router.dart';
 import 'core/state/app_settings_controller.dart';
+import 'core/state/team_context_controller.dart';
+import 'package:flutter_web_plugins/url_strategy.dart';
+
+Future<void> _bootstrapAuthFromUrlIfPresent() async {
+  final uri = Uri.base;
+  final hasCode = uri.queryParameters.containsKey('code');
+  final hasTokenInQuery = uri.queryParameters.containsKey('access_token');
+  final hasTokenInFragment =
+      uri.fragment.contains('access_token=') ||
+      uri.fragment.contains('refresh_token=') ||
+      uri.fragment.contains('type=invite') ||
+      uri.fragment.contains('type=recovery');
+
+  if (!hasCode && !hasTokenInQuery && !hasTokenInFragment) return;
+
+  debugPrint('AuthBootstrap: Detected auth params in URL.');
+  debugPrint('AuthBootstrap: URI=$uri');
+  debugPrint('AuthBootstrap: query=${uri.query}');
+  debugPrint('AuthBootstrap: fragment=${uri.fragment}');
+
+  try {
+    await Supabase.instance.client.auth.getSessionFromUrl(uri);
+    final session = Supabase.instance.client.auth.currentSession;
+    debugPrint(
+      'AuthBootstrap: getSessionFromUrl completed. sessionPresent=${session != null}',
+    );
+  } catch (e) {
+    debugPrint('AuthBootstrap: getSessionFromUrl failed: $e');
+  }
+}
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  usePathUrlStrategy();
 
   // Initialize Supabase
   await Supabase.initialize(
@@ -13,8 +45,27 @@ void main() async {
     anonKey: SupabaseConfig.anonKey,
   );
 
+  // IMPORTANT: Parse auth code/token BEFORE the router can normalize the URL.
+  // This is especially critical for invite/recovery flows that use URL fragments.
+  await _bootstrapAuthFromUrlIfPresent();
+
   // Load settings
   await AppSettingsController.instance.loadSettings();
+
+  // Initialize Team Context
+  await TeamContextController.instance.load();
+
+  // Listen for auth state changes to update team context
+  Supabase.instance.client.auth.onAuthStateChange.listen((data) {
+    final event = data.event;
+    if (event == AuthChangeEvent.signedIn ||
+        event == AuthChangeEvent.tokenRefreshed ||
+        event == AuthChangeEvent.userUpdated) {
+      TeamContextController.instance.load();
+    } else if (event == AuthChangeEvent.signedOut) {
+      TeamContextController.instance.clear();
+    }
+  });
 
   runApp(const OrinxApp());
 }

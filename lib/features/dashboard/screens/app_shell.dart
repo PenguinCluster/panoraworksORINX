@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../auth/services/auth_service.dart';
 import '../../../core/state/profile_manager.dart';
+import '../../../core/state/team_context_controller.dart';
+import '../../../shared/widgets/workspace_identity_header.dart';
 
 class AppShell extends StatelessWidget {
   final Widget child;
@@ -18,11 +19,7 @@ class AppShell extends StatelessWidget {
 
     return Scaffold(
       drawer: isMobile ? const _Sidebar() : null,
-      appBar: isMobile
-          ? AppBar(
-              title: const Text('ORINX'),
-            )
-          : null,
+      appBar: isMobile ? AppBar(title: const Text('ORINX')) : null,
       body: Row(
         children: [
           if (!isMobile) const _Sidebar(),
@@ -54,33 +51,10 @@ class _Sidebar extends StatelessWidget {
       color: theme.colorScheme.surface,
       child: Column(
         children: [
-          // Header / Logo
-          if (!isMobile)
-            Padding(
-              padding: const EdgeInsets.all(24.0),
-              child: Row(
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: theme.primaryColor,
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: const Icon(Icons.auto_awesome, color: Colors.white, size: 20),
-                  ),
-                  const SizedBox(width: 12),
-                  Text(
-                    'ORINX',
-                    style: theme.textTheme.titleLarge?.copyWith(
-                      fontWeight: FontWeight.bold,
-                      letterSpacing: 1.1,
-                    ),
-                  ),
-                ],
-              ),
-            ),
+          // Workspace Identity Header
+          if (!isMobile) const WorkspaceIdentityHeader(),
 
-          // Profile Section
+          // Profile Section (Personal Identity & Logout)
           _ProfileSection(authService: authService),
 
           const Divider(indent: 16, endIndent: 16),
@@ -136,15 +110,25 @@ class _ProfileSection extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
 
-    return ValueListenableBuilder<UserProfile?>(
-      valueListenable: ProfileManager.instance.profileNotifier,
-      builder: (context, userProfile, child) {
+    return ListenableBuilder(
+      listenable: Listenable.merge([
+        ProfileManager.instance.profileNotifier,
+        TeamContextController.instance,
+      ]),
+      builder: (context, child) {
+        final userProfile = ProfileManager.instance.profileNotifier.value;
+        final teamContext = TeamContextController.instance;
+
         if (userProfile == null) {
           return const Padding(
             padding: EdgeInsets.all(16.0),
             child: Center(child: CircularProgressIndicator()),
           );
         }
+
+        // Settings access is allowed if canAccessSettings is true.
+        // Internal gating inside SettingsScreen handles RBAC for workspace tabs.
+        final canAccessSettings = teamContext.canAccessSettings;
 
         return Padding(
           padding: const EdgeInsets.all(16.0),
@@ -158,11 +142,14 @@ class _ProfileSection extends StatelessWidget {
               child: ExpansionTile(
                 leading: CircleAvatar(
                   backgroundColor: theme.primaryColor,
-                  backgroundImage: userProfile.avatarUrl.isNotEmpty 
-                      ? NetworkImage(userProfile.avatarUrl) 
+                  backgroundImage: userProfile.avatarUrl.isNotEmpty
+                      ? NetworkImage(userProfile.avatarUrl)
                       : null,
-                  child: userProfile.avatarUrl.isEmpty 
-                      ? Text(userProfile.initials, style: const TextStyle(color: Colors.white))
+                  child: userProfile.avatarUrl.isEmpty
+                      ? Text(
+                          userProfile.initials,
+                          style: const TextStyle(color: Colors.white),
+                        )
                       : null,
                 ),
                 title: Text(
@@ -176,17 +163,26 @@ class _ProfileSection extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                 ),
                 children: [
+                  if (canAccessSettings)
+                    ListTile(
+                      leading: const Icon(Icons.settings_outlined, size: 20),
+                      title: const Text('Settings'),
+                      onTap: () {
+                        if (MediaQuery.of(context).size.width < 900)
+                          Navigator.pop(context);
+                        context.go('/app/settings');
+                      },
+                    ),
                   ListTile(
-                    leading: const Icon(Icons.settings_outlined, size: 20),
-                    title: const Text('Settings'),
-                    onTap: () {
-                      if (MediaQuery.of(context).size.width < 900) Navigator.pop(context);
-                      context.go('/app/settings');
-                    },
-                  ),
-                  ListTile(
-                    leading: const Icon(Icons.logout, size: 20, color: Colors.red),
-                    title: const Text('Log Out', style: TextStyle(color: Colors.red)),
+                    leading: const Icon(
+                      Icons.logout,
+                      size: 20,
+                      color: Colors.red,
+                    ),
+                    title: const Text(
+                      'Log Out',
+                      style: TextStyle(color: Colors.red),
+                    ),
                     onTap: () async {
                       await authService.signOut();
                       if (context.mounted) context.go('/');
@@ -232,14 +228,18 @@ class _MenuItem extends StatelessWidget {
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
           decoration: BoxDecoration(
-            color: isSelected ? theme.colorScheme.primaryContainer : Colors.transparent,
+            color: isSelected
+                ? theme.colorScheme.primaryContainer
+                : Colors.transparent,
             borderRadius: BorderRadius.circular(8),
           ),
           child: Row(
             children: [
               Icon(
                 isSelected ? selectedIcon : icon,
-                color: isSelected ? theme.colorScheme.onPrimaryContainer : theme.colorScheme.onSurfaceVariant,
+                color: isSelected
+                    ? theme.colorScheme.onPrimaryContainer
+                    : theme.colorScheme.onSurfaceVariant,
                 size: 24,
               ),
               const SizedBox(width: 12),
@@ -247,8 +247,12 @@ class _MenuItem extends StatelessWidget {
                 child: Text(
                   label,
                   style: theme.textTheme.bodyMedium?.copyWith(
-                    fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-                    color: isSelected ? theme.colorScheme.onPrimaryContainer : theme.colorScheme.onSurfaceVariant,
+                    fontWeight: isSelected
+                        ? FontWeight.bold
+                        : FontWeight.normal,
+                    color: isSelected
+                        ? theme.colorScheme.onPrimaryContainer
+                        : theme.colorScheme.onSurfaceVariant,
                   ),
                 ),
               ),

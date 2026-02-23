@@ -39,15 +39,36 @@ class UserProfile {
   }
 }
 
+class TeamProfile {
+  final String teamId;
+  final String workspaceName;
+  final String avatarUrl;
+
+  TeamProfile({
+    required this.teamId,
+    required this.workspaceName,
+    required this.avatarUrl,
+  });
+
+  String get initials {
+    if (workspaceName.isEmpty) return 'W';
+    return workspaceName[0].toUpperCase();
+  }
+}
+
 class ProfileManager {
   static final ProfileManager _instance = ProfileManager._internal();
   static ProfileManager get instance => _instance;
 
   final ValueNotifier<UserProfile?> profileNotifier = ValueNotifier(null);
+  final ValueNotifier<TeamProfile?> workspaceNotifier = ValueNotifier(null);
+  final ValueNotifier<String?> userRoleNotifier = ValueNotifier(null);
+
   final _supabase = Supabase.instance.client;
 
   StreamSubscription<AuthState>? _authSubscription;
   StreamSubscription<List<Map<String, dynamic>>>? _profileSubscription;
+  StreamSubscription<List<Map<String, dynamic>>>? _workspaceSubscription;
 
   ProfileManager._internal() {
     _init();
@@ -56,18 +77,13 @@ class ProfileManager {
   void _init() {
     AppLogger.info('Initializing ProfileManager');
 
-    // Initial load: Only if user is logged in AND session is established.
-    // The synchronous check _supabase.auth.currentUser might return a user
-    // even if the session is stale or not fully hydrated for realtime.
-    // Ideally we wait for the first auth state event.
-
     final currentSession = _supabase.auth.currentSession;
     if (currentSession != null) {
       _loadProfile(currentSession.user.id, currentSession.user.email ?? '');
       _subscribeToProfile(currentSession.user.id);
+      _loadWorkspace(currentSession.user.id);
     }
 
-    // Listen for auth changes
     _authSubscription = _supabase.auth.onAuthStateChange.listen((data) {
       final event = data.event;
       final session = data.session;
@@ -78,11 +94,9 @@ class ProfileManager {
               event == AuthChangeEvent.tokenRefreshed ||
               event == AuthChangeEvent.initialSession) &&
           session != null) {
-        // Ensure we don't double subscribe if ID hasn't changed, but refresh token might need resub?
-        // Supabase Flutter SDK handles channel rejoin on token refresh usually,
-        // but explicit resubscription is safer if channel died.
         _loadProfile(session.user.id, session.user.email ?? '');
         _subscribeToProfile(session.user.id);
+        _loadWorkspace(session.user.id);
       } else if (event == AuthChangeEvent.signedOut) {
         _clearProfile();
       } else if (event == AuthChangeEvent.userUpdated && session != null) {
@@ -100,6 +114,7 @@ class ProfileManager {
     final currentUser = _supabase.auth.currentUser;
     if (currentUser != null) {
       await _loadProfile(currentUser.id, currentUser.email ?? '');
+      await _loadWorkspace(currentUser.id);
     }
   }
 
@@ -109,6 +124,7 @@ class ProfileManager {
           .from('profiles')
           .select()
           .eq('id', userId)
+          .limit(1)
           .maybeSingle();
 
       if (data != null) {
@@ -127,10 +143,7 @@ class ProfileManager {
   }
 
   void _subscribeToProfile(String userId) {
-    // Avoid creating duplicate subscriptions for the same user
     if (_profileSubscription != null) {
-      // We could check if it's the same stream, but it's simpler to cancel and recreate
-      // to ensure the auth token used is fresh (from the new session)
       _profileSubscription!.cancel();
     }
 
@@ -139,6 +152,7 @@ class ProfileManager {
         .from('profiles')
         .stream(primaryKey: ['id'])
         .eq('id', userId)
+        .limit(1)
         .listen(
           (List<Map<String, dynamic>> data) {
             if (data.isNotEmpty) {
@@ -153,7 +167,6 @@ class ProfileManager {
                   language: profile['language'] ?? 'English',
                 );
               } else {
-                // Should normally not happen if loaded first, but handle safety
                 final email = _supabase.auth.currentUser?.email ?? '';
                 profileNotifier.value = UserProfile(
                   id: userId,
@@ -174,15 +187,110 @@ class ProfileManager {
         );
   }
 
+  Future<void> _loadWorkspace(String userId) async {
+    try {
+      // 1. Get first active team membership
+      final memberRes = await _supabase
+          .from('team_members')
+          .select('team_id, role')
+          .eq('user_id', userId)
+          .eq('status', 'active')
+          .limit(1)
+          .maybeSingle();
+
+      if (memberRes != null) {
+        final teamId = memberRes['team_id'] as String;
+        final role = memberRes['role'] as String;
+
+        userRoleNotifier.value = role;
+
+        // 2. Get team_profile
+        final teamProfileRes = await _supabase
+            .from('team_profiles')
+            .select()
+            .eq('team_id', teamId)
+            .maybeSingle();
+
+        if (teamProfileRes != null) {
+          workspaceNotifier.value = TeamProfile(
+            teamId: teamId,
+            workspaceName: teamProfileRes['workspace_name'] ?? 'Workspace',
+            avatarUrl: teamProfileRes['avatar_url'] ?? '',
+          );
+
+          _subscribeToWorkspace(teamId);
+        } else {
+          // Fallback: If no team_profile exists (e.g. legacy team), try to fetch from teams table
+          final teamRes = await _supabase
+              .from('teams')
+              .select('name')
+              .eq('id', teamId)
+              .maybeSingle();
+
+          if (teamRes != null) {
+            workspaceNotifier.value = TeamProfile(
+              teamId: teamId,
+              workspaceName: teamRes['name'] ?? 'Workspace',
+              avatarUrl: '',
+            );
+          }
+        }
+      } else {
+        // Handle case where user has no team (should ideally not happen in this flow if invited/created)
+        workspaceNotifier.value = null;
+        userRoleNotifier.value = null;
+      }
+    } catch (e) {
+      AppLogger.error('Failed to load workspace', e);
+    }
+  }
+
+  void _subscribeToWorkspace(String teamId) {
+    if (_workspaceSubscription != null) {
+      _workspaceSubscription!.cancel();
+    }
+
+    AppLogger.info('Subscribing to workspace updates for $teamId');
+    _workspaceSubscription = _supabase
+        .from('team_profiles')
+        .stream(primaryKey: ['team_id'])
+        .eq('team_id', teamId)
+        .limit(1)
+        .listen(
+          (List<Map<String, dynamic>> data) {
+            if (data.isNotEmpty) {
+              final profile = data.first;
+              AppLogger.info('Realtime workspace update received');
+
+              workspaceNotifier.value = TeamProfile(
+                teamId: teamId,
+                workspaceName: profile['workspace_name'] ?? 'Workspace',
+                avatarUrl: profile['avatar_url'] ?? '',
+              );
+            }
+          },
+          onError: (e) {
+            AppLogger.error('Workspace subscription error', e);
+          },
+        );
+  }
+
   void _clearProfile() {
     profileNotifier.value = null;
+    workspaceNotifier.value = null;
+    userRoleNotifier.value = null;
     _profileSubscription?.cancel();
     _profileSubscription = null;
+    _workspaceSubscription?.cancel();
+    _workspaceSubscription = null;
   }
 
   void dispose() {
     _authSubscription?.cancel();
     _profileSubscription?.cancel();
+    _workspaceSubscription?.cancel();
     profileNotifier.dispose();
+    workspaceNotifier.dispose();
+    userRoleNotifier.dispose();
   }
 }

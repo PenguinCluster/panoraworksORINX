@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
+import '../../../core/state/team_context_controller.dart';
 
 class OrdersSection extends StatefulWidget {
   const OrdersSection({super.key});
@@ -32,13 +33,16 @@ class _OrdersSectionState extends State<OrdersSection> {
   Future<void> _fetchTransactions() async {
     setState(() => _isLoading = true);
     try {
-      final user = _supabase.auth.currentUser;
-      if (user == null) return;
+      final teamId = TeamContextController.instance.teamId;
+      if (teamId == null) {
+        if (mounted) setState(() => _isLoading = false);
+        return;
+      }
 
       var query = _supabase
           .from('transactions')
           .select()
-          .eq('user_id', user.id);
+          .eq('team_id', teamId); // CHANGED: Filter by team_id
 
       if (_searchQuery.isNotEmpty) {
         query = query.or(
@@ -138,11 +142,10 @@ class _OrdersSectionState extends State<OrdersSection> {
     final currency = tx['currency'] ?? 'USD';
     final status = tx['status'] ?? 'unknown';
 
-    // Fetch User Details
-    final user = _supabase.auth.currentUser;
-    final userEmail = user?.email ?? 'N/A';
-    // Ideally fetch name from profiles/billing_profiles table if needed
-    // For now, using email as primary identifier as requested
+    // Fetch User/Team Details
+    // In team scope, billing usually goes to team email or owner email.
+    // We can use workspace name here.
+    final workspaceName = TeamContextController.instance.workspaceDisplayName;
 
     // Fetch Plan Name
     final meta = tx['metadata'] as Map<String, dynamic>?;
@@ -174,7 +177,7 @@ class _OrdersSectionState extends State<OrdersSection> {
               'Bill To:',
               style: pw.TextStyle(fontWeight: pw.FontWeight.bold),
             ),
-            pw.Text(userEmail),
+            pw.Text(workspaceName),
             pw.SizedBox(height: 20),
             pw.Row(
               mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,

@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import '../../../../core/state/profile_manager.dart';
+import 'package:image_picker/image_picker.dart';
+import '../../../core/state/team_context_controller.dart';
+import '../../../core/utils/error_handler.dart';
 
 class TeamSection extends StatefulWidget {
   const TeamSection({super.key});
@@ -10,462 +12,751 @@ class TeamSection extends StatefulWidget {
 }
 
 class _TeamSectionState extends State<TeamSection> {
+  final _displayNameController = TextEditingController();
+  final _brandNameController = TextEditingController();
+  final _inviteEmailController = TextEditingController();
+  final _formKey = GlobalKey<FormState>();
   final _supabase = Supabase.instance.client;
-  List<Map<String, dynamic>> _members = [];
-  bool _isLoading = true;
-  bool _isInviting = false;
 
-  bool _isOwner = false;
+  bool _isSaving = false;
+  bool _isInviting = false;
+  bool _isLoadingMembers = true;
+  bool _isUploadingLogo = false; // Loading state for logo upload
+
+  List<Map<String, dynamic>> _members = [];
+  List<Map<String, dynamic>> _pendingInvites = [];
 
   @override
   void initState() {
     super.initState();
-    _fetchMembers();
+    final controller = TeamContextController.instance;
+    _displayNameController.text = controller.workspaceDisplayName;
+    _brandNameController.text = controller.brandName ?? '';
+    _fetchMembersAndInvites();
   }
 
-  Future<void> _fetchMembers() async {
+  @override
+  void dispose() {
+    _displayNameController.dispose();
+    _brandNameController.dispose();
+    _inviteEmailController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _fetchMembersAndInvites() async {
+    setState(() => _isLoadingMembers = true);
+    final teamId = TeamContextController.instance.teamId;
+    if (teamId == null) return;
+
     try {
-      final user = _supabase.auth.currentUser;
-      if (user == null) return;
-
-      debugPrint('[_fetchMembers] Current User ID: ${user.id}');
-
-      // 1. Get team where user is owner or member
-      // Strategy: Check if I am a member of any team (status active/pending).
-      final memberRes = await _supabase
+      // 1. Fetch team members (raw)
+      final membersResponse = await _supabase
           .from('team_members')
-          .select('team_id, role')
-          .eq('user_id', user.id)
-          .inFilter('status', ['active', 'pending'])
-          .maybeSingle();
+          .select('*')
+          .eq('team_id', teamId);
+      final membersData = List<Map<String, dynamic>>.from(membersResponse);
 
-      String? teamId;
-      String? myRole;
-
-      if (memberRes != null) {
-        teamId = memberRes['team_id'];
-        myRole = memberRes['role'];
-        debugPrint(
-          '[_fetchMembers] Found via membership. Team ID: $teamId, Role: $myRole',
-        );
-      } else {
-        // Fallback: Check if I own a team (maybe member record missing/deleted but team exists?)
-        final teamRes = await _supabase
-            .from('teams')
-            .select('id')
-            .eq('owner_id', user.id)
-            .maybeSingle();
-        if (teamRes != null) {
-          teamId = teamRes['id'];
-          myRole = 'owner'; // Implicit owner
-          debugPrint(
-            '[_fetchMembers] Found via ownership (fallback). Team ID: $teamId',
-          );
-        } else {
-          debugPrint('[_fetchMembers] No team found for user.');
-        }
-      }
-
-      if (teamId == null) {
-        if (mounted) setState(() => _isLoading = false);
-        return;
-      }
-
-      // 2. Fetch all members for this team
-      final data = await _supabase
-          .from('team_members')
-          .select()
+      // 2. Fetch pending invites
+      final invitesResponse = await _supabase
+          .from('team_invites')
+          .select('*')
           .eq('team_id', teamId)
-          .inFilter('status', ['active', 'pending'])
-          .order('created_at', ascending: true);
+          .eq('status', 'pending');
+      final invitesData = List<Map<String, dynamic>>.from(invitesResponse);
 
-      debugPrint(
-        '[_fetchMembers] Query: fetch members for team $teamId. Rows returned: ${data.length}',
-      );
+      // 3. Fetch profiles for active members
+      // Collect user IDs
+      final userIds = membersData
+          .map((m) => m['user_id'] as String?)
+          .where((id) => id != null)
+          .toList();
+
+      Map<String, Map<String, dynamic>> profilesMap = {};
+      if (userIds.isNotEmpty) {
+        final profilesResponse = await _supabase
+            .from('profiles')
+            .select('id, email, full_name, avatar_url')
+            .inFilter('id', userIds);
+        final profilesData = List<Map<String, dynamic>>.from(profilesResponse);
+        profilesMap = {for (var p in profilesData) p['id'] as String: p};
+      }
+
+      // 4. Merge profiles into members
+      // We attach the profile object to the 'profiles' key to match existing UI expectation
+      final mergedMembers = membersData.map((member) {
+        final userId = member['user_id'] as String?;
+        final profile = profilesMap[userId] ?? {};
+        return {...member, 'profiles': profile};
+      }).toList();
 
       if (mounted) {
         setState(() {
-          _members = List<Map<String, dynamic>>.from(data);
-          _isOwner = myRole == 'owner';
-          _isLoading = false;
+          _members = mergedMembers;
+          _pendingInvites = invitesData;
+          _isLoadingMembers = false;
         });
       }
     } catch (e) {
-      debugPrint('Error loading members: $e');
-      if (mounted) setState(() => _isLoading = false);
+      if (mounted) {
+        ErrorHandler.handle(
+          context,
+          e,
+          customMessage: 'Failed to load team members',
+        );
+        setState(() => _isLoadingMembers = false);
+      }
     }
   }
 
-  Future<void> _createInvite(String email, String role, bool isAdmin) async {
-    if (_isInviting) return;
-    setState(() => _isInviting = true);
+  Future<void> _saveChanges() async {
+    if (!_formKey.currentState!.validate()) return;
+
+    setState(() => _isSaving = true);
+
+    final controller = TeamContextController.instance;
+    final teamId = controller.teamId;
+
+    if (teamId == null) return;
 
     try {
-      final user = _supabase.auth.currentUser;
-      if (user == null) return;
+      await _supabase
+          .from('team_profiles')
+          .update({
+            'display_name': _displayNameController.text.trim(),
+            'brand_name': _brandNameController.text.trim(),
+          })
+          .eq('team_id', teamId);
 
-      // Ensure team exists for owner
-      var teamRes = await _supabase
-          .from('teams')
-          .select('id')
-          .eq('owner_id', user.id)
-          .maybeSingle();
-
-      String teamId;
-      if (teamRes == null) {
-        // Auto-create team if missing (for MVP robustness)
-        final newTeam = await _supabase
-            .from('teams')
-            .insert({'owner_id': user.id, 'name': 'My Team'})
-            .select()
-            .single();
-        teamId = newTeam['id'];
-
-        // Add owner as member
-        await _supabase.from('team_members').insert({
-          'team_id': teamId,
-          'user_id': user.id,
-          'email': user.email,
-          'role': 'owner',
-          'status': 'active',
-        });
-      } else {
-        teamId = teamRes['id'];
-      }
-
-      // Use Edge Function for invite + email
-      final res = await _supabase.functions.invoke(
-        'team-invite',
-        body: {
-          'email': email,
-          'team_id': teamId,
-          'role': role,
-          'is_admin_toggle': isAdmin,
-        },
-      );
-
-      final data = res.data as Map<String, dynamic>;
-      if (data['error'] != null) {
-        throw data['error'];
-      }
-
-      final token = data['token'];
       if (mounted) {
-        // Safe navigation check
-        if (Navigator.canPop(context)) {
-          Navigator.pop(context);
-        }
-
-        // Wait briefly to allow navigation to complete
-        await Future.delayed(const Duration(milliseconds: 50));
-
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Invite sent! Link: /#/join-team?token=$token'),
-              duration: const Duration(seconds: 10),
-              action: SnackBarAction(label: 'Copy', onPressed: () {}),
-            ),
-          );
-          _fetchMembers();
-        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Workspace settings updated')),
+        );
+        await controller.refresh();
       }
     } catch (e) {
       if (mounted) {
+        ErrorHandler.handle(
+          context,
+          e,
+          customMessage: 'Error updating settings',
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isSaving = false);
+    }
+  }
+
+  Future<void> _uploadLogo() async {
+    final picker = ImagePicker();
+    final image = await picker.pickImage(source: ImageSource.gallery);
+    if (image == null) return;
+
+    final controller = TeamContextController.instance;
+    final teamId = controller.teamId;
+    if (teamId == null) return;
+
+    setState(() => _isUploadingLogo = true);
+
+    try {
+      final imageExtension = image.path.split('.').last;
+      final imageBytes = await image.readAsBytes();
+      final fileName =
+          'teams/$teamId/logo_${DateTime.now().millisecondsSinceEpoch}.$imageExtension';
+
+      await _supabase.storage
+          .from('avatars')
+          .uploadBinary(
+            fileName,
+            imageBytes,
+            fileOptions: FileOptions(upsert: true, contentType: image.mimeType),
+          );
+
+      final imageUrl = _supabase.storage.from('avatars').getPublicUrl(fileName);
+
+      await _supabase
+          .from('team_profiles')
+          .update({'avatar_url': imageUrl})
+          .eq('team_id', teamId);
+
+      await controller.refresh();
+
+      if (mounted) {
         ScaffoldMessenger.of(
           context,
-        ).showSnackBar(SnackBar(content: Text('Error: $e')));
+        ).showSnackBar(const SnackBar(content: Text('Workspace logo updated')));
+      }
+    } catch (e) {
+      if (mounted) {
+        ErrorHandler.handle(context, e, customMessage: 'Failed to upload logo');
+      }
+    } finally {
+      if (mounted) setState(() => _isUploadingLogo = false);
+    }
+  }
+
+  Future<void> _showInviteDialog() async {
+    final initialEmail = _inviteEmailController.text.trim();
+    if (initialEmail.isEmpty || !initialEmail.contains('@')) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please enter a valid email first')),
+      );
+      return;
+    }
+
+    // Default role
+    String selectedRole = 'member';
+    final emailController = TextEditingController(text: initialEmail);
+
+    await showDialog(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setState) {
+            return AlertDialog(
+              title: const Text('Invite Team Member'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
+                    controller: emailController,
+                    decoration: const InputDecoration(
+                      labelText: 'Email Address',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  DropdownButtonFormField<String>(
+                    value: selectedRole,
+                    decoration: const InputDecoration(
+                      labelText: 'Role',
+                      border: OutlineInputBorder(),
+                    ),
+                    items: const [
+                      DropdownMenuItem(value: 'member', child: Text('Member')),
+                      DropdownMenuItem(
+                        value: 'manager',
+                        child: Text('Manager'),
+                      ),
+                      DropdownMenuItem(value: 'admin', child: Text('Admin')),
+                    ],
+                    onChanged: (value) {
+                      if (value != null) {
+                        setState(() => selectedRole = value);
+                      }
+                    },
+                  ),
+                  if (selectedRole == 'admin')
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8.0),
+                      child: Text(
+                        'Admins have full access to workspace settings and billing.',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Colors.amber[800],
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () {
+                    Navigator.pop(context);
+                    _performInvite(emailController.text.trim(), selectedRole);
+                  },
+                  child: const Text('Send Invite'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<void> _performInvite(String email, String role) async {
+    if (email.isEmpty || !email.contains('@')) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Invalid email address')));
+      return;
+    }
+
+    setState(() => _isInviting = true);
+    final teamId = TeamContextController.instance.teamId;
+
+    try {
+      // Use 'team-invite' which is the verified existing function
+      await _supabase.functions.invoke(
+        'team-invite',
+        body: {
+          'team_id': teamId,
+          'email': email,
+          'role': role,
+          // If role is admin, set toggle to true, otherwise false
+          'is_admin_toggle': role == 'admin',
+        },
+      );
+
+      _inviteEmailController.clear();
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Invite sent to $email')));
+        _fetchMembersAndInvites();
+      }
+    } catch (e) {
+      if (mounted) {
+        ErrorHandler.handle(context, e, customMessage: 'Failed to send invite');
       }
     } finally {
       if (mounted) setState(() => _isInviting = false);
     }
   }
 
-  Future<void> _resendInvite(String email, String role, String teamId) async {
-    try {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Resending invite...')));
+  Future<void> _resendInvite(String email) async {
+    final teamId = TeamContextController.instance.teamId;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Resending invite...'),
+        duration: Duration(seconds: 1),
+      ),
+    );
 
-      final res = await _supabase.functions.invoke(
+    try {
+      // Use 'team-invite' for resend as well
+      await _supabase.functions.invoke(
         'team-invite',
         body: {
-          'email': email,
           'team_id': teamId,
-          'role': role,
-          'is_admin_toggle': role == 'admin', // infer from role
+          'email': email,
+          'role':
+              'member', // Default or preserve? The function handles existing invites.
+          'action': 'resend', // Explicit action if supported, or implicit.
         },
       );
 
-      final data = res.data as Map<String, dynamic>;
-      if (data['error'] != null) {
-        throw data['error'];
-      }
-
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Invite resent successfully!')),
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Invite resent to $email')));
+      }
+    } catch (e) {
+      if (mounted) {
+        ErrorHandler.handle(
+          context,
+          e,
+          customMessage: 'Failed to resend invite',
         );
       }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Error resending invite: $e')));
-      }
     }
   }
 
-  Future<void> _removeMember(String memberId) async {
+  Future<void> _removeMember(String userId) async {
+    final teamId = TeamContextController.instance.teamId;
     try {
-      final res = await _supabase.rpc(
-        'remove_team_member',
-        params: {'target_member_id': memberId},
-      );
-
-      if (res['error'] != null) {
-        throw res['error'];
-      }
-      _fetchMembers();
+      await _supabase
+          .from('team_members')
+          .delete()
+          .eq('team_id', teamId!)
+          .eq('user_id', userId);
+      _fetchMembersAndInvites();
     } catch (e) {
-      debugPrint('Error removing member: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Error: $e')));
-      }
+      if (mounted) ErrorHandler.handle(context, e);
     }
   }
 
-  void _showInviteDialog() {
-    final emailController = TextEditingController();
-    String role = 'manager';
-    bool isAdmin = false;
-
-    showDialog(
-      context: context,
-      barrierDismissible: !_isInviting,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setState) => AlertDialog(
-          title: const Text('Invite People'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: emailController,
-                decoration: const InputDecoration(labelText: 'Email Address'),
-                keyboardType: TextInputType.emailAddress,
-                enabled: !_isInviting,
-              ),
-              const SizedBox(height: 16),
-              DropdownButtonFormField<String>(
-                value: role,
-                decoration: const InputDecoration(labelText: 'Role'),
-                items: const [
-                  DropdownMenuItem(value: 'manager', child: Text('Manager')),
-                  DropdownMenuItem(value: 'admin', child: Text('Admin')),
-                ],
-                onChanged: _isInviting
-                    ? null
-                    : (v) => setState(() => role = v!),
-              ),
-              const SizedBox(height: 16),
-              SwitchListTile(
-                title: const Text('Grant Admin Permissions'),
-                subtitle: const Text('Can manage team settings'),
-                value: isAdmin,
-                onChanged: _isInviting
-                    ? null
-                    : (v) => setState(() => isAdmin = v),
-                contentPadding: EdgeInsets.zero,
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: _isInviting ? null : () => Navigator.pop(context),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: _isInviting
-                  ? null
-                  : () {
-                      if (emailController.text.isNotEmpty) {
-                        // We must call setState to update the dialog if we wanted a spinner there,
-                        // but since _isInviting is in the parent widget state, we can just rely on the parent state
-                        // However, StatefulBuilder only rebuilds when its setState is called.
-                        // Since we are not triggering the dialog's setState when _isInviting changes in parent,
-                        // the dialog won't update its UI (disabled buttons) automatically unless we force it.
-                        // Actually, since _createInvite calls setState on the parent, the parent rebuilds.
-                        // Does the dialog rebuild? No, showDialog pushes a new route.
-                        // So we need to handle state locally in the dialog if we want to show loading there.
-                        // OR we can close the dialog immediately and show a global loader.
-
-                        // BUT the requirement is "Fix the Invite People button freeze/crash".
-                        // The crash is likely due to async gaps and navigation.
-                        // Let's stick to the robust navigation fix requested.
-                        _createInvite(emailController.text, role, isAdmin);
-
-                        // Note: The buttons in the dialog won't visually disable because the dialog's setState isn't called.
-                        // But the _isInviting guard in _createInvite prevents double submission.
-                      }
-                    },
-              child: _isInviting
-                  ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: Colors.white,
-                      ),
-                    )
-                  : const Text('Send Invite'),
-            ),
-          ],
-        ),
-      ),
-    );
+  Future<void> _cancelInvite(String inviteId) async {
+    try {
+      await _supabase.from('team_invites').delete().eq('id', inviteId);
+      _fetchMembersAndInvites();
+    } catch (e) {
+      if (mounted) ErrorHandler.handle(context, e);
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final userProfile = ProfileManager.instance.profileNotifier.value;
-    final currentUserId = _supabase.auth.currentUser?.id;
+    final theme = Theme.of(context);
+    final isSmallScreen = MediaQuery.of(context).size.width < 600;
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text(
-              'Team and people',
-              style: Theme.of(
-                context,
-              ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold),
-            ),
-            if (_isOwner)
-              FilledButton.icon(
-                onPressed: _showInviteDialog,
-                icon: const Icon(Icons.person_add_alt_1),
-                label: const Text('Invite people'),
+    return ListenableBuilder(
+      listenable: TeamContextController.instance,
+      builder: (context, _) {
+        final controller = TeamContextController.instance;
+
+        final canEditIdentity = controller.canEditWorkspaceIdentity;
+        final canManageMembers = controller.canManageTeamMembers;
+
+        if (!controller.isMemberLike) {
+          return const Center(child: Text('Access Restricted'));
+        }
+
+        return SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // --- Section 1: Workspace Identity ---
+              Text('Workspace Identity', style: theme.textTheme.headlineMedium),
+              const SizedBox(height: 8),
+              Text(
+                'Manage your shared workspace profile.',
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
               ),
-          ],
-        ),
-        const SizedBox(height: 32),
-        const Text('Members', style: TextStyle(fontWeight: FontWeight.bold)),
-        const SizedBox(height: 16),
-        Card(
-          child: _isLoading
-              ? const Padding(
-                  padding: EdgeInsets.all(16),
-                  child: Center(child: CircularProgressIndicator()),
-                )
-              : _members.isEmpty
-              ? const Padding(
-                  padding: EdgeInsets.all(16),
-                  child: Text('No members found.'),
-                )
-              : ListView.separated(
+              const SizedBox(height: 32),
+
+              if (!canEditIdentity)
+                Container(
+                  margin: const EdgeInsets.only(bottom: 24),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.amber.withOpacity(0.1),
+                    border: Border.all(color: Colors.amber),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.info_outline, color: Colors.amber),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          'You are viewing this workspace as an Admin. Identity settings are read-only.',
+                          style: theme.textTheme.bodyMedium,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+
+              Form(
+                key: _formKey,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (isSmallScreen) ...[
+                      Center(child: _buildAvatar(controller, theme)),
+                      const SizedBox(height: 16),
+                      if (canEditIdentity) Center(child: _buildUploadButton()),
+                    ] else
+                      Row(
+                        children: [
+                          _buildAvatar(controller, theme),
+                          const SizedBox(width: 24),
+                          if (canEditIdentity) _buildUploadButton(),
+                        ],
+                      ),
+                    const SizedBox(height: 32),
+                    TextFormField(
+                      controller: _displayNameController,
+                      readOnly: !canEditIdentity,
+                      decoration: const InputDecoration(
+                        labelText: 'Workspace Name',
+                        border: OutlineInputBorder(),
+                        helperText: 'Visible to all team members',
+                      ),
+                      validator: (value) {
+                        if (value == null || value.isEmpty) {
+                          return 'Please enter a workspace name';
+                        }
+                        return null;
+                      },
+                    ),
+                    const SizedBox(height: 24),
+                    TextFormField(
+                      controller: _brandNameController,
+                      readOnly: !canEditIdentity,
+                      decoration: const InputDecoration(
+                        labelText: 'Brand Name',
+                        border: OutlineInputBorder(),
+                        helperText: 'Used for external branding (optional)',
+                      ),
+                    ),
+                    const SizedBox(height: 32),
+                    if (canEditIdentity)
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: FilledButton.icon(
+                          onPressed: _isSaving ? null : _saveChanges,
+                          icon: _isSaving
+                              ? const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.white,
+                                  ),
+                                )
+                              : const Icon(Icons.save),
+                          label: const Text('Save Changes'),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+
+              const Divider(height: 64),
+
+              // --- Section 2: Team Members ---
+              Text('Team Members', style: theme.textTheme.headlineMedium),
+              const SizedBox(height: 8),
+              Text(
+                'Invite and manage your team.',
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 32),
+
+              if (canManageMembers) ...[
+                if (isSmallScreen) ...[
+                  TextField(
+                    controller: _inviteEmailController,
+                    decoration: const InputDecoration(
+                      labelText: 'Invite by Email',
+                      hintText: 'colleague@example.com',
+                      border: OutlineInputBorder(),
+                      prefixIcon: Icon(Icons.email),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.icon(
+                      onPressed: _isInviting ? null : _showInviteDialog,
+                      icon: _isInviting
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            )
+                          : const Icon(Icons.send),
+                      label: const Text('Invite'),
+                    ),
+                  ),
+                ] else
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _inviteEmailController,
+                          decoration: const InputDecoration(
+                            labelText: 'Invite by Email',
+                            hintText: 'colleague@example.com',
+                            border: OutlineInputBorder(),
+                            prefixIcon: Icon(Icons.email),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 16),
+                      FilledButton.icon(
+                        onPressed: _isInviting ? null : _showInviteDialog,
+                        icon: _isInviting
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.white,
+                                ),
+                              )
+                            : const Icon(Icons.send),
+                        label: const Text('Invite'),
+                      ),
+                    ],
+                  ),
+                const SizedBox(height: 32),
+              ],
+
+              if (_isLoadingMembers)
+                const Center(child: CircularProgressIndicator())
+              else ...[
+                if (_pendingInvites.isNotEmpty) ...[
+                  Text(
+                    'Pending Invites',
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.bold,
+                      color: theme.colorScheme.primary,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  ListView.builder(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    itemCount: _pendingInvites.length,
+                    itemBuilder: (context, index) {
+                      final invite = _pendingInvites[index];
+                      return Card(
+                        margin: const EdgeInsets.only(bottom: 8),
+                        child: ListTile(
+                          leading: const CircleAvatar(
+                            child: Icon(Icons.mail_outline),
+                          ),
+                          title: Text(
+                            invite['email'],
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          subtitle: Text('Sent: ${invite['created_at']}'),
+                          trailing: canManageMembers
+                              ? Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    IconButton(
+                                      icon: const Icon(Icons.refresh),
+                                      color: Colors.blue,
+                                      onPressed: () =>
+                                          _resendInvite(invite['email']),
+                                      tooltip: 'Resend Invite',
+                                    ),
+                                    IconButton(
+                                      icon: const Icon(Icons.delete_outline),
+                                      color: Colors.red,
+                                      onPressed: () =>
+                                          _cancelInvite(invite['id']),
+                                      tooltip: 'Cancel Invite',
+                                    ),
+                                  ],
+                                )
+                              : null,
+                        ),
+                      );
+                    },
+                  ),
+                  const SizedBox(height: 32),
+                ],
+
+                Text(
+                  'Active Members',
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                ListView.builder(
                   shrinkWrap: true,
                   physics: const NeverScrollableScrollPhysics(),
                   itemCount: _members.length,
-                  separatorBuilder: (context, index) =>
-                      const Divider(height: 1),
                   itemBuilder: (context, index) {
                     final member = _members[index];
-                    final isMe = member['user_id'] == currentUserId;
-                    final isPending = member['status'] == 'pending';
-                    final role = member['role'];
-                    final email = member['email'];
-                    final invitedAt = member['created_at'] != null
-                        ? DateTime.parse(member['created_at']).toLocal()
-                        : null;
-                    final dateStr = invitedAt != null
-                        ? '${invitedAt.year}-${invitedAt.month.toString().padLeft(2, '0')}-${invitedAt.day.toString().padLeft(2, '0')}'
-                        : '';
+                    final profile = member['profiles'] ?? {};
+                    final name = profile['full_name'] ?? 'Unknown';
+                    final email = profile['email'] ?? 'No Email';
+                    final role = member['role'].toString().toUpperCase();
+                    final isMe =
+                        member['user_id'] == _supabase.auth.currentUser?.id;
 
-                    return ListTile(
-                      leading: CircleAvatar(
-                        backgroundColor: isPending ? Colors.orange[100] : null,
-                        child: isPending
-                            ? const Icon(
-                                Icons.hourglass_empty,
-                                size: 16,
-                                color: Colors.orange,
-                              )
-                            : Text(
-                                email.isNotEmpty ? email[0].toUpperCase() : 'U',
-                              ),
-                      ),
-                      title: Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              isMe ? '$email (You)' : email,
-                              overflow: TextOverflow.ellipsis,
-                              maxLines: 1,
-                            ),
-                          ),
-                          if (isPending) ...[
-                            const SizedBox(width: 8),
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 8,
-                                vertical: 2,
-                              ),
-                              decoration: BoxDecoration(
-                                color: Colors.orange.withOpacity(0.2),
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(color: Colors.orange),
-                              ),
-                              child: const Text(
-                                'Pending',
-                                style: TextStyle(
-                                  fontSize: 10,
-                                  color: Colors.deepOrange,
+                    return Card(
+                      margin: const EdgeInsets.only(bottom: 8),
+                      child: ListTile(
+                        leading: CircleAvatar(
+                          backgroundImage: profile['avatar_url'] != null
+                              ? NetworkImage(profile['avatar_url'])
+                              : null,
+                          child: profile['avatar_url'] == null
+                              ? Text(name.isNotEmpty ? name[0] : '?')
+                              : null,
+                        ),
+                        title: Text(
+                          '$name ${isMe ? "(You)" : ""}',
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        subtitle: Text(email, overflow: TextOverflow.ellipsis),
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if (!isSmallScreen)
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                  vertical: 4,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: theme.colorScheme.secondaryContainer,
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                child: Text(
+                                  role,
+                                  style: TextStyle(
+                                    color:
+                                        theme.colorScheme.onSecondaryContainer,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.bold,
+                                  ),
                                 ),
                               ),
-                            ),
-                          ],
-                        ],
-                      ),
-                      subtitle: Text(
-                        'Role: ${role.toString().toUpperCase()} • Joined: $dateStr',
-                      ),
-                      trailing: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          if (role == 'owner') const Chip(label: Text('Owner')),
-                          // Resend button: Only show if I am owner, target is pending
-                          if (_isOwner && isPending) ...[
-                            const SizedBox(width: 8),
-                            IconButton(
-                              icon: const Icon(Icons.send, color: Colors.blue),
-                              onPressed: () =>
-                                  _resendInvite(email, role, member['team_id']),
-                              tooltip: 'Resend Invite',
-                            ),
-                          ],
-                          // Remove button: Only show if I am owner, and target is not me and not owner
-                          if (_isOwner && !isMe && role != 'owner') ...[
-                            const SizedBox(width: 8),
-                            IconButton(
-                              icon: const Icon(
-                                Icons.delete_outline,
+                            if (canManageMembers && !isMe) ...[
+                              const SizedBox(width: 8),
+                              IconButton(
+                                icon: const Icon(Icons.delete_outline),
                                 color: Colors.red,
+                                onPressed: () =>
+                                    _removeMember(member['user_id']),
+                                tooltip: 'Remove Member',
                               ),
-                              onPressed: () => _removeMember(member['id']),
-                              tooltip: 'Remove Member',
-                            ),
+                            ],
                           ],
-                        ],
+                        ),
                       ),
                     );
                   },
                 ),
-        ),
-      ],
+              ],
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildAvatar(TeamContextController controller, ThemeData theme) {
+    return Container(
+      width: 80,
+      height: 80,
+      decoration: BoxDecoration(
+        color: theme.primaryColor,
+        borderRadius: BorderRadius.circular(12),
+        image: controller.workspaceAvatarUrl != null
+            ? DecorationImage(
+                image: NetworkImage(controller.workspaceAvatarUrl!),
+                fit: BoxFit.cover,
+              )
+            : null,
+      ),
+      child: controller.workspaceAvatarUrl == null
+          ? Center(
+              child: Text(
+                controller.workspaceDisplayName.isNotEmpty
+                    ? controller.workspaceDisplayName[0].toUpperCase()
+                    : 'W',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 32,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            )
+          : null,
+    );
+  }
+
+  Widget _buildUploadButton() {
+    return OutlinedButton.icon(
+      onPressed: _isUploadingLogo ? null : _uploadLogo,
+      icon: _isUploadingLogo
+          ? const SizedBox(
+              width: 20,
+              height: 20,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : const Icon(Icons.upload),
+      label: Text(_isUploadingLogo ? 'Uploading...' : 'Change Logo'),
     );
   }
 }

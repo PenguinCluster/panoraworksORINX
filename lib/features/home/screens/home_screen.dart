@@ -6,7 +6,7 @@ class HomeScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
+    // final theme = Theme.of(context); // Unused
     final isDesktop = MediaQuery.of(context).size.width > 900;
 
     return Scaffold(

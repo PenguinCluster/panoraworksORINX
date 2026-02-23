@@ -1,0 +1,2 @@
+[functions.team-invite]
+verify_jwt = false
