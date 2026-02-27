@@ -2,7 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import '../../../../core/state/team_context_controller.dart';
+import '../../../core/state/team_context_controller.dart';
 
 class JoinTeamScreen extends StatefulWidget {
   final String? token;
@@ -27,23 +27,104 @@ class _JoinTeamScreenState extends State<JoinTeamScreen> {
     _validateAndJoin();
   }
 
-  Future<Session?> _waitForSession({
-    Duration timeout = const Duration(seconds: 10),
+  // ---------------------------------------------------------------------------
+  // _sanitizeToken
+  //
+  // THE BUG:
+  //   The Flutter router can hand us a contaminated token like:
+  //     "af2cb30a-6801-41c0-8c03-34d563f56a12?next=/app/overview"
+  //
+  //   This happens with old invite emails (sent before the buildRedirectTo fix)
+  //   where `?next=/app/overview` was appended to the join-team URL without
+  //   encoding, causing GoRouter to include it in the `token` query param value.
+  //   When this raw string is sent to the edge function, Postgres throws
+  //   error 22P02 (invalid_text_representation) because it is not a valid UUID.
+  //
+  // THE FIX:
+  //   Split on `?` and `&` and take the first segment. This is safe because
+  //   a UUID never contains `?` or `&`. The edge function also does this as a
+  //   second line of defence, but we sanitize here first so error messages
+  //   in the UI are clear and the network call never carries garbage data.
+  // ---------------------------------------------------------------------------
+  String _sanitizeToken(String raw) {
+    final clean = raw.split('?').first.split('&').first.trim();
+    if (clean != raw) {
+      debugPrint(
+        'JoinTeamScreen: token sanitized from "$raw" to "$clean"',
+      );
+    }
+    return clean;
+  }
+
+  // ---------------------------------------------------------------------------
+  // _waitForValidSession
+  //
+  // THE BUG:
+  //   The old code called the PREPARE edge function BEFORE waiting for a
+  //   session. JoinTeamScreen is navigated to immediately after
+  //   SetPasswordScreen calls context.go('/join-team?token=...'), but the
+  //   Supabase Flutter client fires auth state events asynchronously. In the
+  //   window between navigation and the userUpdated/tokenRefreshed event, the
+  //   client still holds the pre-password session (or no session at all).
+  //
+  //   Additionally, refreshSession() after updateUser() returns quickly but
+  //   the new session JWT is sometimes not yet accepted by Supabase Auth if
+  //   called within milliseconds of the password change. Using that JWT for
+  //   functions.invoke() produced a 401.
+  //
+  // THE FIX (three parts):
+  //   1. Wait for a confirmed, live session FIRST — before any network calls.
+  //   2. Listen specifically for AuthChangeEvent.userUpdated and
+  //      AuthChangeEvent.tokenRefreshed, which guarantee the new session is
+  //      fully committed. Also accept signedIn as a fallback.
+  //   3. After receiving the event, extract accessToken directly from
+  //      data.session (the event payload) rather than calling refreshSession()
+  //      again. The event session IS the fresh, valid session.
+  // ---------------------------------------------------------------------------
+  Future<Session?> _waitForValidSession({
+    Duration timeout = const Duration(seconds: 12),
   }) async {
+    // Fast-path: if a live session is already present and fresh enough,
+    // return it immediately. "Fresh enough" = not expiring in the next 30s.
     final existing = _supabase.auth.currentSession;
-    if (existing != null) return existing;
+    if (existing != null) {
+      final expiresAt = existing.expiresAt; // seconds since epoch
+      final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      if (expiresAt == null || expiresAt - nowSec > 30) {
+        return existing;
+      }
+    }
+
+    debugPrint('JoinTeamScreen: waiting for valid session…');
 
     final completer = Completer<Session?>();
     late final StreamSubscription<AuthState> sub;
 
     sub = _supabase.auth.onAuthStateChange.listen((data) {
-      if (data.session != null && !completer.isCompleted) {
-        completer.complete(data.session);
+      if (completer.isCompleted) return;
+
+      final session = data.session;
+      if (session == null) return;
+
+      final relevantEvent =
+          data.event == AuthChangeEvent.signedIn ||
+          data.event == AuthChangeEvent.userUpdated ||
+          data.event == AuthChangeEvent.tokenRefreshed;
+
+      if (relevantEvent) {
+        debugPrint(
+          'JoinTeamScreen: session confirmed via ${data.event}',
+        );
+        completer.complete(session);
       }
     });
 
+    // Timeout guard
     Future.delayed(timeout, () {
-      if (!completer.isCompleted) completer.complete(null);
+      if (!completer.isCompleted) {
+        debugPrint('JoinTeamScreen: session wait timed out');
+        completer.complete(null);
+      }
     });
 
     final session = await completer.future;
@@ -52,11 +133,31 @@ class _JoinTeamScreenState extends State<JoinTeamScreen> {
   }
 
   Future<void> _validateAndJoin() async {
-    final token = widget.token;
-    if (token == null || token.isEmpty) {
+    // ── 0. Validate raw token input ─────────────────────────────────────────
+    final rawToken = widget.token;
+    if (rawToken == null || rawToken.trim().isEmpty) {
       setState(() {
         _isLoading = false;
-        _errorMessage = 'Invalid or missing invite token.';
+        _errorMessage = 'Invalid or missing invite token. '
+            'Please reopen the invite link from your email.';
+      });
+      return;
+    }
+
+    // Sanitize immediately — strips `?next=...` and `&...` suffixes that
+    // old invite emails can inject into the token value via the router.
+    final token = _sanitizeToken(rawToken.trim());
+
+    // Basic UUID format check — catches gross corruption before any network call.
+    final uuidPattern = RegExp(
+      r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+      caseSensitive: false,
+    );
+    if (!uuidPattern.hasMatch(token)) {
+      setState(() {
+        _isLoading = false;
+        _errorMessage = 'The invite link appears to be malformed. '
+            'Please reopen the invite link from your email.';
       });
       return;
     }
@@ -69,67 +170,91 @@ class _JoinTeamScreenState extends State<JoinTeamScreen> {
     });
 
     try {
-      // 1. PREPARE: Check if the invite is valid and get the target email
-      final prep = await _supabase.functions.invoke(
-        'team-accept-invite',
-        body: {'token': token, 'action': 'prepare'},
-      );
-
-      if (prep.status != 200) {
-        throw Exception(prep.data['error'] ?? 'Invite lookup failed');
-      }
-
-      final inviteEmail = (prep.data['email'] ?? '').toString().trim();
-
-      // 2. WAIT FOR SESSION: Ensure we are actually logged in
+      // ── 1. Wait for a valid session FIRST ──────────────────────────────────
+      //
+      // ORDERING CHANGE: The old code called PREPARE before waiting for a
+      // session. We now wait first. This guarantees:
+      //   a) The PREPARE call has a valid JWT in the Authorization header.
+      //   b) The ACCEPT call uses the same confirmed session — no stale token.
+      //
       setState(() => _waitingForSession = true);
-      final session = await _waitForSession();
+      final session = await _waitForValidSession();
       setState(() => _waitingForSession = false);
 
       if (session == null || _supabase.auth.currentUser == null) {
         setState(() {
           _isLoading = false;
-          _infoMessage = 'Please check your email ($inviteEmail) to set your password and log in.';
+          _infoMessage =
+              'Your session could not be confirmed. Please check your email '
+              'for the invite link and set your password to continue.';
         });
         return;
       }
 
-      // 3. EMAIL MATCH VALIDATION
-      final currentEmail = _supabase.auth.currentUser!.email ?? '';
-      if (currentEmail.toLowerCase() != inviteEmail.toLowerCase()) {
+      // Extract the access token from the confirmed session event.
+      // DO NOT call refreshSession() here — it is redundant and can
+      // briefly return an old token if called too quickly after updateUser().
+      final accessToken = session.accessToken;
+
+      // ── 2. PREPARE — look up the invite details ────────────────────────────
+      //
+      // Now that verify_jwt is false on the edge function, this call goes
+      // through regardless of the JWT state. We still pass the auth header
+      // so the edge function logs have full context.
+      final prepRes = await _supabase.functions.invoke(
+        'team-accept-invite',
+        headers: {'Authorization': 'Bearer $accessToken'},
+        body: {'token': token, 'action': 'prepare'},
+      );
+
+      if (prepRes.status != 200) {
+        final errMsg = prepRes.data?['error'] ?? 'Invite lookup failed.';
+        throw Exception(errMsg);
+      }
+
+      final inviteEmail =
+          (prepRes.data['email'] ?? '').toString().trim().toLowerCase();
+
+      // ── 3. Email match validation ──────────────────────────────────────────
+      final currentEmail =
+          (_supabase.auth.currentUser!.email ?? '').toLowerCase();
+
+      if (currentEmail != inviteEmail) {
         await _supabase.auth.signOut();
         setState(() {
           _isLoading = false;
-          _errorMessage = 'This invite is for $inviteEmail, but you are logged in as $currentEmail. You have been signed out.';
+          _errorMessage =
+              'This invite is for $inviteEmail, but you are logged in as '
+              '$currentEmail. You have been signed out. Please reopen the '
+              'invite link from your email.';
         });
         return;
       }
 
-      // 4. THE JWT REFRESH: This prevents the 401 loop
-      // Refreshing right before the call ensures the token is fresh and has the latest user metadata
-      final refreshRes = await _supabase.auth.refreshSession();
-      final freshToken = refreshRes.session?.accessToken;
-
-      if (freshToken == null) throw Exception('Failed to obtain a fresh security token.');
-
-      // 5. ACCEPT: Finalize the join
+      // ── 4. ACCEPT — write the membership record ───────────────────────────
+      //
+      // Pass the exact same accessToken we confirmed in step 1.
+      // verify_jwt is now false, so there is no infrastructure-layer 401 risk.
+      // The edge function's auth.getUser(token) call is the single source of
+      // truth for session validation.
       final acceptRes = await _supabase.functions.invoke(
         'team-accept-invite',
-        headers: {'Authorization': 'Bearer $freshToken'},
+        headers: {'Authorization': 'Bearer $accessToken'},
         body: {'token': token, 'action': 'accept'},
       );
 
       if (acceptRes.status != 200) {
-        throw Exception(acceptRes.data['error'] ?? 'Failed to accept invitation');
+        final errMsg =
+            acceptRes.data?['error'] ?? 'Failed to accept invitation.';
+        throw Exception(errMsg);
       }
 
-      // 6. SUCCESS & CONTEXT REFRESH
+      // ── 5. Refresh team context and navigate ─────────────────────────────
       setState(() {
         _isLoading = false;
         _isSuccess = true;
       });
 
-      // Force the global team state to update immediately
       await TeamContextController.instance.refresh();
 
       if (mounted) {
@@ -139,10 +264,12 @@ class _JoinTeamScreenState extends State<JoinTeamScreen> {
         context.go('/app/overview');
       }
     } catch (e) {
+      final msg = e.toString().replaceFirst('Exception: ', '');
+      debugPrint('JoinTeamScreen error: $msg');
       setState(() {
         _isLoading = false;
         _waitingForSession = false;
-        _errorMessage = e.toString().replaceFirst('Exception: ', '');
+        _errorMessage = msg;
       });
     }
   }
@@ -154,31 +281,66 @@ class _JoinTeamScreenState extends State<JoinTeamScreen> {
       body: Center(
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (_waitingForSession || _isLoading) ...[
-                const CircularProgressIndicator(),
-                const SizedBox(height: 24),
-                Text(_waitingForSession ? 'Syncing session...' : 'Verifying invite...'),
-              ] else if (_isSuccess) ...[
-                const Icon(Icons.check_circle, color: Colors.green, size: 64),
-                const SizedBox(height: 24),
-                const Text('Joined successfully!', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-              ] else if (_infoMessage != null) ...[
-                const Icon(Icons.mail_outline, color: Colors.blue, size: 64),
-                const SizedBox(height: 16),
-                Text(_infoMessage!, textAlign: TextAlign.center),
-                const SizedBox(height: 24),
-                ElevatedButton(onPressed: () => context.go('/login'), child: const Text('Go to Login')),
-              ] else ...[
-                const Icon(Icons.error_outline, color: Colors.red, size: 64),
-                const SizedBox(height: 16),
-                Text(_errorMessage ?? 'An error occurred', textAlign: TextAlign.center, style: const TextStyle(color: Colors.red)),
-                const SizedBox(height: 24),
-                ElevatedButton(onPressed: _validateAndJoin, child: const Text('Try Again')),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 400),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (_waitingForSession) ...[
+                  const CircularProgressIndicator(),
+                  const SizedBox(height: 24),
+                  const Text(
+                    'Syncing session…',
+                    style: TextStyle(color: Colors.grey),
+                  ),
+                ] else if (_isLoading) ...[
+                  const CircularProgressIndicator(),
+                  const SizedBox(height: 24),
+                  const Text(
+                    'Verifying invite…',
+                    style: TextStyle(color: Colors.grey),
+                  ),
+                ] else if (_isSuccess) ...[
+                  const Icon(Icons.check_circle,
+                      color: Colors.green, size: 64),
+                  const SizedBox(height: 24),
+                  const Text(
+                    'Joined successfully!',
+                    style: TextStyle(
+                        fontSize: 20, fontWeight: FontWeight.bold),
+                  ),
+                ] else if (_infoMessage != null) ...[
+                  const Icon(Icons.mail_outline,
+                      color: Colors.blue, size: 64),
+                  const SizedBox(height: 16),
+                  Text(
+                    _infoMessage!,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(fontSize: 15),
+                  ),
+                  const SizedBox(height: 24),
+                  ElevatedButton(
+                    onPressed: () => context.go('/login'),
+                    child: const Text('Go to Login'),
+                  ),
+                ] else ...[
+                  const Icon(Icons.error_outline,
+                      color: Colors.red, size: 64),
+                  const SizedBox(height: 16),
+                  Text(
+                    _errorMessage ?? 'An unexpected error occurred.',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Colors.red),
+                  ),
+                  const SizedBox(height: 24),
+                  ElevatedButton.icon(
+                    onPressed: _validateAndJoin,
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('Try Again'),
+                  ),
+                ],
               ],
-            ],
+            ),
           ),
         ),
       ),
