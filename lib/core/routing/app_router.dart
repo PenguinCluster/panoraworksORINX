@@ -41,7 +41,6 @@ final appRouter = GoRouter(
       return '/login?next=${Uri.encodeComponent(nextUri.toString())}';
     }
 
-    // Public routes that don't require auth
     final isPublicRoute =
         location == '/' ||
         location == '/login' ||
@@ -51,27 +50,27 @@ final appRouter = GoRouter(
         location == '/join-team' ||
         location == '/set-password';
 
-    // Invite onboarding must never be wrapped into /login by the router guard.
     if (location.contains('set-password') ||
         location.contains('join-team') ||
         location.contains('auth/callback')) {
       return null;
     }
 
+    // FIX BUG 1: Root with confirmation code/token must go to callback first
+    if (location == '/' &&
+        (fullUri.queryParameters.containsKey('code') || fullUri.fragment.contains('access_token='))) {
+      return '/auth/callback?${fullUri.query}&${fullUri.fragment}';
+    }
+
     if (session == null) {
-      // If not logged in and trying to access protected route (like /app/*)
       if (!isPublicRoute && location.startsWith('/app')) {
         return loginWithNext(fullUri);
       }
     } else {
-      // If logged in
-
-      // Prevent infinite redirect loops if already on target pages
       if (location == '/app/overview' || location == '/set-password') {
         return null;
       }
 
-      // If user is on login/signup pages, push them into app
       if (location == '/login' ||
           location == '/signup' ||
           location == '/forgot-password') {
@@ -79,8 +78,11 @@ final appRouter = GoRouter(
         return next ?? '/app/overview';
       }
 
-      // If root /app is hit, redirect to overview
       if (location == '/app') {
+        return '/app/overview';
+      }
+
+      if (location == '/') {
         return '/app/overview';
       }
     }

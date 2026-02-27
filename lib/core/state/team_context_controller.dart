@@ -15,7 +15,6 @@ class TeamContextController extends ChangeNotifier {
   String? _role;
   String? _status;
 
-  // Workspace Identity
   String _workspaceDisplayName = 'My Workspace';
   String? _workspaceAvatarUrl;
   String? _brandName;
@@ -24,7 +23,6 @@ class TeamContextController extends ChangeNotifier {
 
   String? _error;
 
-  // Getters
   bool get isLoading => _isLoading;
   bool get hasTeam => _hasTeam;
   String? get teamId => _teamId;
@@ -39,56 +37,31 @@ class TeamContextController extends ChangeNotifier {
 
   String? get error => _error;
 
-  // Role Helpers
+  Map<String, dynamic> get teamProfile => {
+        'avatarUrl': _workspaceAvatarUrl,
+      };
+
   bool get isOwner => _role == 'owner';
   bool get isAdmin => _role == 'admin';
   bool get isManager => _role == 'manager';
   bool get isMember => _role == 'member';
 
-  // --- Centralized RBAC Permissions ---
-
-  /// Can the user access the Settings area at all?
-  /// Now true for everyone, as everyone has personal settings.
   bool get canAccessSettings => true;
-
-  // Tab Access
   bool get canAccessProfileTab => true;
   bool get canAccessLoginTab => true;
   bool get canAccessAccessibilityTab => true;
-
-  /// Workspace-level tabs (Team, Billing, Orders)
-  /// Only Owners and Admins can access these.
   bool get canAccessWorkspaceSettings => isOwner || isAdmin;
-
   bool get canAccessTeamTab => canAccessWorkspaceSettings;
   bool get canAccessBillingTab => canAccessWorkspaceSettings;
   bool get canAccessOrdersTab => canAccessWorkspaceSettings;
-
-  // Feature Permissions
-
-  /// Can edit workspace name, logo, brand?
-  /// Only Owner. Admins are read-only.
   bool get canEditWorkspaceIdentity => isOwner;
-
-  /// Can invite/remove members?
-  /// Owner and Admin.
   bool get canManageTeamMembers => isOwner || isAdmin;
-
-  /// Can view/manage connected accounts (Integrations)?
-  /// Only Owner.
   bool get canViewConnectedAccounts => isOwner;
-
-  /// Can view detailed billing info?
-  /// Owner and Admin.
   bool get canViewBilling => isOwner || isAdmin;
-
-  // ------------------------------------
-
   bool get isMemberLike => isOwner || isAdmin || isManager || isMember;
 
   TeamContextController._internal();
 
-  /// Load workspace context from Supabase RPC
   Future<void> load() async {
     if (_isLoading) return;
 
@@ -126,12 +99,10 @@ class TeamContextController extends ChangeNotifier {
     }
   }
 
-  /// Refresh the context (useful after updates)
   Future<void> refresh() async {
     await load();
   }
 
-  /// Clear context (on logout)
   void clear() {
     _isLoading = false;
     _hasTeam = false;

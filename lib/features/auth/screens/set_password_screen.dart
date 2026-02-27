@@ -27,9 +27,6 @@ class _SetPasswordScreenState extends State<SetPasswordScreen> {
     super.initState();
     _checkSession();
 
-    // Invite/password-recovery resilience:
-    // If the callback establishes a session asynchronously after this page is shown,
-    // update the UI without requiring a refresh.
     _authSubscription = Supabase.instance.client.auth.onAuthStateChange.listen((
       data,
     ) {
@@ -37,8 +34,6 @@ class _SetPasswordScreenState extends State<SetPasswordScreen> {
       final session = data.session;
       if (session == null) return;
 
-      // AuthChangeEvent.passwordRecovery is used for recovery links.
-      // Invited-user flows typically come through as signedIn/userUpdated.
       if (event == AuthChangeEvent.passwordRecovery ||
           event == AuthChangeEvent.signedIn ||
           event == AuthChangeEvent.userUpdated ||
@@ -97,16 +92,17 @@ class _SetPasswordScreenState extends State<SetPasswordScreen> {
         );
       }
 
-      // 1. Update password
       await supabase.auth.updateUser(
         UserAttributes(password: _passwordController.text),
       );
 
-      // 2. Mark initialized (optional)
+      // FIX BUG 2: Force fresh JWT after password update (prevents 401 in join-team)
+      await supabase.auth.refreshSession();
+      debugPrint('SetPasswordScreen: Session refreshed after password update');
+
       try {
         await supabase.rpc('mark_password_initialized');
       } catch (e) {
-        // Ignore if RPC missing or fails, as updateUser is the critical part
         debugPrint('mark_password_initialized failed (optional step): $e');
       }
 
@@ -116,7 +112,6 @@ class _SetPasswordScreenState extends State<SetPasswordScreen> {
         const SnackBar(content: Text('Password set successfully!')),
       );
 
-      // 3. Route to next
       final nextDest = widget.next;
       debugPrint('SetPasswordScreen: Routing to next=$nextDest');
 
@@ -174,7 +169,6 @@ class _SetPasswordScreenState extends State<SetPasswordScreen> {
                       ),
                       const SizedBox(height: 32),
 
-                      // Error Display
                       if (_error != null) ...[
                         Container(
                           padding: const EdgeInsets.all(12),
@@ -205,7 +199,6 @@ class _SetPasswordScreenState extends State<SetPasswordScreen> {
                         const SizedBox(height: 24),
                       ],
 
-                      // Form Fields (Disabled if no session)
                       TextFormField(
                         controller: _passwordController,
                         obscureText: true,

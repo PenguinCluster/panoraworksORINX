@@ -10,6 +10,7 @@ class AuthService {
     required String password,
     String? username,
     String? fullName,
+    String? emailRedirectTo,
   }) async {
     AppLogger.info('Attempting signup for $email');
     final response = await _supabase.auth.signUp(
@@ -19,6 +20,7 @@ class AuthService {
         if (username != null) 'username': username,
         if (fullName != null) 'full_name': fullName,
       },
+      emailRedirectTo: emailRedirectTo,
     );
     AppLogger.info('Signup successful for $email');
     return response;

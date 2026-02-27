@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -92,10 +93,23 @@ class _SignupScreenState extends State<SignupScreen> {
       }
 
       // 3) Proceed with standard signup if not locked
+      String? emailRedirectTo;
+      if (kIsWeb) {
+        // Construct callback URL dynamically for web (e.g. http://localhost:xxxx/auth/callback)
+        final base = '${Uri.base.origin}/auth/callback';
+        final dest = _sanitizeNext(widget.next);
+        if (dest != null) {
+          emailRedirectTo = '$base?next=${Uri.encodeComponent(dest)}';
+        } else {
+          emailRedirectTo = base;
+        }
+      }
+
       await _authService.signUp(
         email: email,
         password: _passwordController.text.trim(),
         username: _usernameController.text.trim(),
+        emailRedirectTo: emailRedirectTo,
       );
 
       if (!mounted) return;
@@ -141,8 +155,8 @@ class _SignupScreenState extends State<SignupScreen> {
                   Text(
                     'Create Account',
                     style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                          fontWeight: FontWeight.bold,
-                        ),
+                      fontWeight: FontWeight.bold,
+                    ),
                     textAlign: TextAlign.center,
                   ),
                   const SizedBox(height: 32),
@@ -235,7 +249,9 @@ class _SignupScreenState extends State<SignupScreen> {
                   TextButton(
                     onPressed: () {
                       if (dest != null) {
-                        context.push('/login?next=${Uri.encodeComponent(dest)}');
+                        context.push(
+                          '/login?next=${Uri.encodeComponent(dest)}',
+                        );
                       } else {
                         context.push('/login');
                       }

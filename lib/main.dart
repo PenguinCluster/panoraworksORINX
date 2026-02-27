@@ -5,32 +5,51 @@ import 'core/routing/app_router.dart';
 import 'core/state/app_settings_controller.dart';
 import 'core/state/team_context_controller.dart';
 import 'package:flutter_web_plugins/url_strategy.dart';
+import 'dart:html' as html; // Added for minimal web redirect on root+code
 
 Future<void> _bootstrapAuthFromUrlIfPresent() async {
   final uri = Uri.base;
-  final hasCode = uri.queryParameters.containsKey('code');
-  final hasTokenInQuery = uri.queryParameters.containsKey('access_token');
-  final hasTokenInFragment =
-      uri.fragment.contains('access_token=') ||
+  final hasCode = uri.queryParameters.containsKey('code') || uri.queryParameters.containsKey('error');
+  final hasTokenInFragment = uri.fragment.contains('access_token=') ||
       uri.fragment.contains('refresh_token=') ||
       uri.fragment.contains('type=invite') ||
       uri.fragment.contains('type=recovery');
 
-  if (!hasCode && !hasTokenInQuery && !hasTokenInFragment) return;
+  if (!hasCode && !hasTokenInFragment) return;
 
   debugPrint('AuthBootstrap: Detected auth params in URL.');
-  debugPrint('AuthBootstrap: URI=$uri');
-  debugPrint('AuthBootstrap: query=${uri.query}');
-  debugPrint('AuthBootstrap: fragment=${uri.fragment}');
+
+  // FIX BUG 1: If landed on root with code/token (standalone confirmation), force /auth/callback
+  if (uri.path == '/' && (hasCode || hasTokenInFragment)) {
+    final callbackUri = Uri.parse('/auth/callback').replace(
+      queryParameters: uri.queryParameters,
+      fragment: uri.fragment,
+    );
+    debugPrint('AuthBootstrap: Redirecting root+code to callback: ${callbackUri.toString()}');
+    html.window.location.replace(callbackUri.toString());
+    return;
+  }
 
   try {
-    await Supabase.instance.client.auth.getSessionFromUrl(uri);
-    final session = Supabase.instance.client.auth.currentSession;
-    debugPrint(
-      'AuthBootstrap: getSessionFromUrl completed. sessionPresent=${session != null}',
-    );
+    final auth = Supabase.instance.client.auth;
+    await auth.getSessionFromUrl(uri);
+    final session = auth.currentSession;
+    debugPrint('AuthBootstrap: getSessionFromUrl completed. sessionPresent=${session != null}');
   } catch (e) {
     debugPrint('AuthBootstrap: getSessionFromUrl failed: $e');
+    String? refreshToken;
+    try {
+      final fragmentParams = Uri.splitQueryString(uri.fragment);
+      refreshToken = fragmentParams['refresh_token'];
+    } catch (_) {}
+    if (refreshToken != null && refreshToken.isNotEmpty) {
+      debugPrint('AuthBootstrap: Found refresh_token in fragment. Using setSession().');
+      try {
+        await Supabase.instance.client.auth.setSession(refreshToken);
+      } catch (e2) {
+        debugPrint('AuthBootstrap: setSession failed: $e2');
+      }
+    }
   }
 }
 
@@ -39,23 +58,17 @@ void main() async {
 
   usePathUrlStrategy();
 
-  // Initialize Supabase
   await Supabase.initialize(
     url: SupabaseConfig.url,
     anonKey: SupabaseConfig.anonKey,
   );
 
-  // IMPORTANT: Parse auth code/token BEFORE the router can normalize the URL.
-  // This is especially critical for invite/recovery flows that use URL fragments.
   await _bootstrapAuthFromUrlIfPresent();
 
-  // Load settings
   await AppSettingsController.instance.loadSettings();
 
-  // Initialize Team Context
   await TeamContextController.instance.load();
 
-  // Listen for auth state changes to update team context
   Supabase.instance.client.auth.onAuthStateChange.listen((data) {
     final event = data.event;
     if (event == AuthChangeEvent.signedIn ||
@@ -97,30 +110,24 @@ class OrinxApp extends StatelessWidget {
     final baseTheme = isDark ? ThemeData.dark() : ThemeData.light();
     final highContrast = settings.highContrast;
 
-    // High Contrast Adjustments
     Color seedColor = Colors.blue;
     if (highContrast) {
-      // Use higher contrast colors if needed, but for MVP standard seed often works well.
-      // We can enforce specific background/text colors.
       seedColor = isDark ? Colors.cyanAccent : Colors.blue[900]!;
     }
 
     final colorScheme = ColorScheme.fromSeed(
       seedColor: seedColor,
       brightness: brightness,
-      // Force higher contrast surfaces if highContrast is on
       background: highContrast ? (isDark ? Colors.black : Colors.white) : null,
     );
 
     return baseTheme.copyWith(
       colorScheme: colorScheme,
       useMaterial3: true,
-      // Reduce Motion: Disable page transitions
       pageTransitionsTheme: settings.reduceMotion
           ? const PageTransitionsTheme(
               builders: {
-                TargetPlatform.android:
-                    FadeUpwardsPageTransitionsBuilder(), // Or NoAnimationPageTransitionsBuilder if custom
+                TargetPlatform.android: FadeUpwardsPageTransitionsBuilder(),
                 TargetPlatform.iOS: FadeUpwardsPageTransitionsBuilder(),
                 TargetPlatform.macOS: FadeUpwardsPageTransitionsBuilder(),
                 TargetPlatform.windows: FadeUpwardsPageTransitionsBuilder(),
@@ -128,7 +135,6 @@ class OrinxApp extends StatelessWidget {
               },
             )
           : null,
-      // High Contrast: Strengthen borders/dividers
       dividerTheme: highContrast
           ? const DividerThemeData(thickness: 2, color: Colors.black)
           : null,

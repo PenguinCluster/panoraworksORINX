@@ -189,12 +189,13 @@ class ProfileManager {
 
   Future<void> _loadWorkspace(String userId) async {
     try {
-      // 1. Get first active team membership
       final memberRes = await _supabase
           .from('team_members')
           .select('team_id, role')
           .eq('user_id', userId)
           .eq('status', 'active')
+          .order('created_at', ascending: false) // FIX BUG 3: deterministic newest first
+          .order('role', ascending: false)       // owner/manager first
           .limit(1)
           .maybeSingle();
 
@@ -204,7 +205,6 @@ class ProfileManager {
 
         userRoleNotifier.value = role;
 
-        // 2. Get team_profile
         final teamProfileRes = await _supabase
             .from('team_profiles')
             .select()
@@ -220,7 +220,6 @@ class ProfileManager {
 
           _subscribeToWorkspace(teamId);
         } else {
-          // Fallback: If no team_profile exists (e.g. legacy team), try to fetch from teams table
           final teamRes = await _supabase
               .from('teams')
               .select('name')
@@ -236,7 +235,6 @@ class ProfileManager {
           }
         }
       } else {
-        // Handle case where user has no team (should ideally not happen in this flow if invited/created)
         workspaceNotifier.value = null;
         userRoleNotifier.value = null;
       }
