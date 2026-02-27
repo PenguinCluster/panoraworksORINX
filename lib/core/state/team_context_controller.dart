@@ -62,6 +62,8 @@ class TeamContextController extends ChangeNotifier {
 
   TeamContextController._internal();
 
+  // ─── Core Load ────────────────────────────────────────────────────────────
+
   Future<void> load() async {
     if (_isLoading) return;
 
@@ -69,6 +71,70 @@ class TeamContextController extends ChangeNotifier {
     _error = null;
     notifyListeners();
 
+    await _fetchAndApply();
+
+    _isLoading = false;
+    notifyListeners();
+  }
+
+  Future<void> refresh() async {
+    await load();
+  }
+
+  // ─── Retry-with-Backoff (Bug 1 Fix) ───────────────────────────────────────
+  //
+  // Called from OverviewScreen after a fresh standalone signup.
+  // The Postgres trigger that creates the team + owner row runs synchronously
+  // with the auth.users INSERT, but email-confirmation flows can briefly
+  // surface a session before the first RPC response has propagated through
+  // PostgREST's schema cache. Three quick retries with a short delay is
+  // enough to bridge that window without blocking the UI.
+  //
+  // Usage:
+  //   await TeamContextController.instance.loadWithRetry();
+  //
+  Future<void> loadWithRetry({
+    int maxAttempts = 4,
+    Duration initialDelay = const Duration(milliseconds: 600),
+  }) async {
+    Duration delay = initialDelay;
+
+    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+      _isLoading = true;
+      _error = null;
+      notifyListeners();
+
+      await _fetchAndApply();
+
+      _isLoading = false;
+      notifyListeners();
+
+      if (_hasTeam) {
+        AppLogger.info(
+          'TeamContext: resolved on attempt $attempt. role=$_role teamId=$_teamId',
+        );
+        return;
+      }
+
+      if (attempt < maxAttempts) {
+        AppLogger.info(
+          'TeamContext: no team on attempt $attempt, retrying in ${delay.inMilliseconds}ms…',
+        );
+        await Future.delayed(delay);
+        delay *= 2; // exponential backoff: 600ms → 1200ms → 2400ms
+      }
+    }
+
+    AppLogger.error(
+      'TeamContext: no team found after $maxAttempts attempts. '
+      'This may indicate a trigger failure — check Postgres logs.',
+      null,
+    );
+  }
+
+  // ─── Internal ─────────────────────────────────────────────────────────────
+
+  Future<void> _fetchAndApply() async {
     try {
       final response = await _supabase.rpc('get_my_workspace_context');
 
@@ -80,27 +146,22 @@ class TeamContextController extends ChangeNotifier {
 
         final workspace = response['workspace'];
         if (workspace != null) {
-          _workspaceDisplayName = workspace['display_name'] ?? 'My Workspace';
+          _workspaceDisplayName =
+              workspace['display_name'] ?? 'My Workspace';
           _workspaceAvatarUrl = workspace['avatar_url'];
           _brandName = workspace['brand_name'];
           _brandColor = workspace['brand_color'];
-          _workspaceSettings = workspace['settings'] ?? {};
+          _workspaceSettings =
+              (workspace['settings'] as Map<String, dynamic>?) ?? {};
         }
       } else {
         _hasTeam = false;
       }
     } catch (e) {
-      AppLogger.error('Failed to load team context', e);
+      AppLogger.error('TeamContext: RPC failed', e);
       _error = e.toString();
       _hasTeam = false;
-    } finally {
-      _isLoading = false;
-      notifyListeners();
     }
-  }
-
-  Future<void> refresh() async {
-    await load();
   }
 
   void clear() {
