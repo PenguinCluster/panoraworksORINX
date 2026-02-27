@@ -27,6 +27,27 @@ final appRouter = GoRouter(
     final location = state.matchedLocation;
     final fullUri = state.uri;
 
+    // -------------------------------------------------------------------------
+    // _firstQueryParam
+    //
+    // THE BUG THAT WAS HERE:
+    //   state.uri.queryParameters['next']
+    //
+    // Like auth_callback_page.dart, Dart's Uri.queryParameters returns the
+    // LAST value when a key appears multiple times. Old invite links produced
+    // URLs with two `next` params (e.g. `?next=/join-team?token=X&next=/app/overview`).
+    // Using `.queryParameters['next']` silently discarded the join-team token.
+    //
+    // THE FIX:
+    //   state.uri.queryParametersAll[key]?.firstOrNull
+    //
+    // Always use the FIRST occurrence of a query parameter — that is always the
+    // one we intentionally placed in the URL via buildRedirectTo.
+    // -------------------------------------------------------------------------
+    String? firstQueryParam(String key) =>
+        fullUri.queryParametersAll[key]?.firstOrNull ??
+        fullUri.queryParameters[key];
+
     String? sanitizeNext(String? next) {
       if (next == null) return null;
       final trimmed = next.trim();
@@ -41,8 +62,7 @@ final appRouter = GoRouter(
       return '/login?next=${Uri.encodeComponent(nextUri.toString())}';
     }
 
-    final isPublicRoute =
-        location == '/' ||
+    final isPublicRoute = location == '/' ||
         location == '/login' ||
         location == '/signup' ||
         location == '/forgot-password' ||
@@ -50,15 +70,18 @@ final appRouter = GoRouter(
         location == '/join-team' ||
         location == '/set-password';
 
+    // Never redirect away from auth flow screens — they manage their own navigation.
     if (location.contains('set-password') ||
         location.contains('join-team') ||
         location.contains('auth/callback')) {
       return null;
     }
 
-    // FIX BUG 1: Root with confirmation code/token must go to callback first
+    // Root page with a Supabase auth code or token fragment → forward to
+    // auth/callback so the session can be exchanged properly.
     if (location == '/' &&
-        (fullUri.queryParameters.containsKey('code') || fullUri.fragment.contains('access_token='))) {
+        (fullUri.queryParameters.containsKey('code') ||
+            fullUri.fragment.contains('access_token='))) {
       return '/auth/callback?${fullUri.query}&${fullUri.fragment}';
     }
 
@@ -74,7 +97,8 @@ final appRouter = GoRouter(
       if (location == '/login' ||
           location == '/signup' ||
           location == '/forgot-password') {
-        final next = sanitizeNext(fullUri.queryParameters['next']);
+        // Use firstQueryParam so a duplicate next= doesn't redirect us to the wrong place.
+        final next = sanitizeNext(firstQueryParam('next'));
         return next ?? '/app/overview';
       }
 
@@ -111,7 +135,21 @@ final appRouter = GoRouter(
     GoRoute(
       path: '/set-password',
       builder: (context, state) {
-        final next = state.uri.queryParameters['next'];
+        // FIX: Use queryParametersAll.first to get the CORRECT next value.
+        //
+        // The old code used state.uri.queryParameters['next'] which returns the
+        // LAST duplicate key. After the routing chain mangling from the old
+        // buildRedirectTo, the URL looked like:
+        //   /set-password?next=/join-team?token=TOKEN&next=/app/overview
+        //
+        // queryParameters['next'] returned '/app/overview' (last value).
+        // queryParametersAll['next']?.first returns '/join-team?token=TOKEN' (first). ✓
+        //
+        // With the new single-encoded buildRedirectTo this URL will never have
+        // duplicate next params, but this defence costs nothing and protects
+        // against any future regression.
+        final next = state.uri.queryParametersAll['next']?.firstOrNull ??
+            state.uri.queryParameters['next'];
         return SetPasswordScreen(next: next);
       },
     ),
@@ -122,7 +160,9 @@ final appRouter = GoRouter(
     GoRoute(
       path: '/join-team',
       builder: (context, state) {
-        final token = state.uri.queryParameters['token'];
+        // FIX: Use queryParametersAll.first for token as well.
+        final token = state.uri.queryParametersAll['token']?.firstOrNull ??
+            state.uri.queryParameters['token'];
         return JoinTeamScreen(token: token);
       },
     ),
