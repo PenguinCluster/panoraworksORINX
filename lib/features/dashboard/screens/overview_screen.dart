@@ -2,108 +2,17 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../../core/state/team_context_controller.dart';
 
-/// OverviewScreen
-///
-/// Bug 1 Fix: On first mount, we call [TeamContextController.loadWithRetry]
-/// instead of the bare [load]. This retries the `get_my_workspace_context`
-/// RPC a few times with exponential backoff, bridging the narrow window
-/// where the Postgres trigger has just run but the app loaded before the
-/// first response resolved (typically only a few hundred milliseconds on
-/// a fresh email-confirmation redirect).
-class OverviewScreen extends StatefulWidget {
+class OverviewScreen extends StatelessWidget {
   const OverviewScreen({super.key});
-
-  @override
-  State<OverviewScreen> createState() => _OverviewScreenState();
-}
-
-class _OverviewScreenState extends State<OverviewScreen> {
-  @override
-  void initState() {
-    super.initState();
-
-    // If we already have a resolved team context (e.g. navigating back from
-    // another tab), skip the retry — load() is a no-op while _isLoading is
-    // true, so this is safe to call unconditionally.
-    final controller = TeamContextController.instance;
-    if (!controller.hasTeam && !controller.isLoading) {
-      // Post-frame to avoid calling setState-like operations during build.
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        TeamContextController.instance.loadWithRetry();
-      });
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return ListenableBuilder(
-      listenable: TeamContextController.instance,
-      builder: (context, _) {
-        final controller = TeamContextController.instance;
-
-        // While retrying, show a loading state instead of "No active workspace"
-        if (controller.isLoading) {
-          return const Center(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                CircularProgressIndicator(),
-                SizedBox(height: 16),
-                Text('Loading workspace…'),
-              ],
-            ),
-          );
-        }
-
-        // After all retries, still no team — surface a clear error with a
-        // manual retry button rather than a confusing blank screen.
-        if (!controller.hasTeam) {
-          return Center(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Icon(Icons.workspace_premium_outlined,
-                    size: 56, color: Colors.grey),
-                const SizedBox(height: 16),
-                const Text(
-                  'No active workspace found.',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                ),
-                const SizedBox(height: 8),
-                const Text(
-                  'This can happen if your account is still being set up.\n'
-                  'Please wait a moment and try again.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(color: Colors.grey),
-                ),
-                const SizedBox(height: 24),
-                FilledButton.icon(
-                  onPressed: () => controller.loadWithRetry(),
-                  icon: const Icon(Icons.refresh),
-                  label: const Text('Retry'),
-                ),
-              ],
-            ),
-          );
-        }
-
-        // Normal dashboard content
-        return _DashboardContent(teamId: controller.teamId!);
-      },
-    );
-  }
-}
-
-// ─── Dashboard Content ────────────────────────────────────────────────────────
-
-class _DashboardContent extends StatelessWidget {
-  final String teamId;
-
-  const _DashboardContent({required this.teamId});
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final teamId = TeamContextController.instance.teamId;
+
+    if (teamId == null) {
+      return const Center(child: Text('No active workspace'));
+    }
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(24.0),
@@ -146,12 +55,12 @@ class _DashboardContent extends StatelessWidget {
 
           const SizedBox(height: 32),
 
-          // Connect-accounts prompt
+          // Connect accounts state
           FutureBuilder<List<Map<String, dynamic>>>(
             future: Supabase.instance.client
                 .from('connected_accounts')
                 .select()
-                .eq('team_id', teamId),
+                .eq('team_id', teamId), // CHANGED: Filter by team_id
             builder: (context, snapshot) {
               final connections = snapshot.data ?? [];
               if (connections.isEmpty) {
@@ -191,7 +100,7 @@ class _DashboardContent extends StatelessWidget {
 
           const SizedBox(height: 32),
 
-          // Recent Activity (placeholder)
+          // Recent Activity (Simulated)
           Text(
             'Recent Activity',
             style: theme.textTheme.titleLarge?.copyWith(
@@ -218,8 +127,6 @@ class _DashboardContent extends StatelessWidget {
     );
   }
 }
-
-// ─── Stat Card ────────────────────────────────────────────────────────────────
 
 class _StatCard extends StatelessWidget {
   final String title;
