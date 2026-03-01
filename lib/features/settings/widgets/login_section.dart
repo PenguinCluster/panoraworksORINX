@@ -590,9 +590,14 @@ class _LoginSectionState extends State<LoginSection> {
         ),
         const SizedBox(height: 12),
         OutlinedButton.icon(
-          onPressed: () {},
+          onPressed: null, // disabled — Supabase Flutter SDK has no passkey API yet
           icon: const Icon(Icons.key),
           label: const Text('Add passkey'),
+        ),
+        const SizedBox(height: 4),
+        const Text(
+          'Passkey support is coming soon.',
+          style: TextStyle(color: Colors.grey, fontSize: 12),
         ),
         const Divider(height: 48),
 
