@@ -238,11 +238,61 @@ class _LoginSectionState extends State<LoginSection> {
     try {
       final email = _supabase.auth.currentUser?.email;
       if (email == null) throw const AuthException('No authenticated user.');
-      await _supabase.auth
-          .signInWithPassword(email: email, password: currentPassword);
-      await _supabase.auth.updateUser(UserAttributes(password: newPassword));
+
+      // ── Bug 3 fix: AAL check before any sensitive operation ──────────────
+      //
+      // Supabase requires an aal2 session to change passwords when MFA is
+      // enrolled. We check BEFORE re-auth so we know which path to take:
+      //
+      //   Path A — MFA enrolled, session is aal1:
+      //     Show TOTP step-up dialog. signInWithPassword is intentionally
+      //     SKIPPED here because it would reset an aal2 session back to aal1,
+      //     causing the same insufficient_aal error immediately after.
+      //     The TOTP step-up IS the re-authentication for MFA users.
+      //
+      //   Path B — No MFA (currentLevel == nextLevel == aal1):
+      //     Classic re-auth via signInWithPassword, then updateUser.
+      //
+      //   Path C — Already aal2 (MFA verified this session):
+      //     Skip both re-auth and step-up; go straight to updateUser.
+      final aalData = _supabase.auth.mfa.getAuthenticatorAssuranceLevel();
+      final currentLevel = aalData.currentLevel;
+      final nextLevel    = aalData.nextLevel;
+
+      if (nextLevel?.name == 'aal2' &&
+          currentLevel?.name != 'aal2') {
+        // Path A — MFA enrolled but not yet verified this session.
+        // Show step-up dialog; do NOT call signInWithPassword.
+        setState(() => _isUpdatingPassword = false); // release lock during dialog
+        final steppedUp = await _showMfaStepUpDialog();
+        if (!steppedUp) return false; // user cancelled
+        setState(() => _isUpdatingPassword = true);
+        // Session is now aal2 — fall through to updateUser below.
+      } else if (currentLevel?.name != 'aal2') {
+        // Path B — No MFA enrolled; use classic current-password re-auth.
+        await _supabase.auth
+            .signInWithPassword(email: email, password: currentPassword);
+      }
+      // Path C — Already aal2: no re-auth needed, fall through.
+
+      // ── Bug 1 fix: write password_last_changed into user metadata ────────
+      //
+      // user.updatedAt changes on ANY profile update (name, email, etc.),
+      // not just password changes. Storing a dedicated key in user_metadata
+      // gives us a precise "password last changed" timestamp.
+      //
+      // We bundle both into a single updateUser call to avoid a race between
+      // the password write and the metadata write — one atomic operation.
+      final now = DateTime.now().toUtc().toIso8601String();
+      await _supabase.auth.updateUser(
+        UserAttributes(
+          password: newPassword,
+          data: {'password_last_changed': now},
+        ),
+      );
+
       if (mounted) {
-        setState(() {});
+        setState(() {}); // re-reads userMetadata['password_last_changed'] in build
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('Password updated successfully.'),
@@ -253,9 +303,11 @@ class _LoginSectionState extends State<LoginSection> {
       return true;
     } on AuthException catch (e) {
       if (mounted) {
-        final message =
-            e.message.toLowerCase().contains('invalid login credentials')
-                ? 'Current password is incorrect.'
+        final msg = e.message.toLowerCase();
+        final message = msg.contains('invalid login credentials')
+            ? 'Current password is incorrect.'
+            : msg.contains('insufficient_aal')
+                ? 'A verified MFA session is required. Please re-authenticate.'
                 : e.message;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -269,6 +321,125 @@ class _LoginSectionState extends State<LoginSection> {
     } finally {
       if (mounted) setState(() => _isUpdatingPassword = false);
     }
+  }
+
+  // ── Bug 3: TOTP step-up dialog ────────────────────────────────────────────
+  //
+  // Shows a minimal challenge+verify dialog to lift the session from aal1 →
+  // aal2. This is reused by _updatePassword; it is NOT the enrollment flow
+  // (no enroll() call, no QR code — the factor already exists).
+  //
+  // Returns true if the session was successfully stepped up to aal2.
+  // Returns false if the user cancelled or the code was wrong after retries.
+  Future<bool> _showMfaStepUpDialog() async {
+    final codeCtrl = TextEditingController();
+    bool result    = false;
+
+    await showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        bool   isLoading    = false;
+        String? errorText;
+
+        return StatefulBuilder(builder: (context, setDS) {
+          Future<void> verify() async {
+            final code = codeCtrl.text.trim();
+            if (code.length != 6) {
+              setDS(() => errorText = 'Enter the 6-digit code.');
+              return;
+            }
+            setDS(() { isLoading = true; errorText = null; });
+
+            try {
+              // listFactors is fast (rarely hits network) — gets us the factorId.
+              final factors = await _supabase.auth.mfa.listFactors();
+              final factor  = factors.totp.firstWhere(
+                (f) => f.status == FactorStatus.verified,
+                orElse: () => throw const AuthException('No verified MFA factor found.'),
+              );
+
+              // Create a fresh challenge then verify immediately.
+              final challenge = await _supabase.auth.mfa
+                  .challenge(factorId: factor.id);
+              await _supabase.auth.mfa.verify(
+                factorId:    factor.id,
+                challengeId: challenge.id,
+                code:        code,
+              );
+
+              result = true;
+              if (dialogContext.mounted) Navigator.pop(dialogContext);
+            } on AuthException catch (e) {
+              if (dialogContext.mounted) {
+                setDS(() {
+                  isLoading = false;
+                  errorText = e.message.toLowerCase().contains('invalid')
+                      ? 'Incorrect code — check your app and try again.'
+                      : e.message;
+                });
+              }
+            }
+          }
+
+          return AlertDialog(
+            title: const Text('Confirm your identity'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Changing your password requires MFA verification. '
+                  'Enter the 6-digit code from your authenticator app.',
+                ),
+                const SizedBox(height: 20),
+                TextField(
+                  controller: codeCtrl,
+                  enabled: !isLoading,
+                  autofocus: true,
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [
+                    FilteringTextInputFormatter.digitsOnly,
+                    LengthLimitingTextInputFormatter(6),
+                  ],
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    fontSize: 28,
+                    fontFamily: 'monospace',
+                    letterSpacing: 8,
+                    fontWeight: FontWeight.bold,
+                  ),
+                  decoration: InputDecoration(
+                    hintText: '000000',
+                    border: const OutlineInputBorder(),
+                    errorText: errorText,
+                  ),
+                  onSubmitted: (_) { if (!isLoading) verify(); },
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: isLoading ? null : () => Navigator.pop(dialogContext),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: isLoading ? null : verify,
+                child: isLoading
+                    ? const SizedBox(
+                        width: 16, height: 16,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.white),
+                      )
+                    : const Text('Confirm'),
+              ),
+            ],
+          );
+        });
+      },
+    ).whenComplete(codeCtrl.dispose);
+
+    return result;
   }
 
   // ─── Phase 3: delete account ───────────────────────────────────────────────
@@ -435,15 +606,15 @@ class _LoginSectionState extends State<LoginSection> {
 
     try {
       // ── Step 1: Invoke the Edge Function ──────────────────────────────
-      // functions.invoke() returns a FunctionResponse with:
-      //   .data   → decoded response body (dynamic — Map or String)
-      //   .status → HTTP status code
-      //
-      // We need the raw bytes to pass to file_saver, so we re-encode
-      // the decoded body back to UTF-8 bytes. This avoids the complexity
-      // of using http.Client directly while staying within the Supabase SDK.
-      final response =
-          await _supabase.functions.invoke('export-user-data');
+      // Bug 2 fix: explicitly include the Authorization header.
+      // The Supabase Flutter SDK does not always forward the session token
+      // automatically to functions.invoke() — passing it explicitly is
+      // the reliable cross-version approach.
+      final token    = _supabase.auth.currentSession?.accessToken ?? '';
+      final response = await _supabase.functions.invoke(
+        'export-user-data',
+        headers: {'Authorization': 'Bearer $token'},
+      );
 
       if (response.status != 200) {
         final errMsg = (response.data is Map)
@@ -475,7 +646,7 @@ class _LoginSectionState extends State<LoginSection> {
       await FileSaver.instance.saveFile(
         name:     filename,
         bytes:    bytes,
-        fileExtension:      'json',
+        fileExtension:'json',
         mimeType: MimeType.json,
       );
 
@@ -669,8 +840,16 @@ class _LoginSectionState extends State<LoginSection> {
     final theme = Theme.of(context);
     final user  = _supabase.auth.currentUser;
 
-    final passwordLastUpdated = _formatDate(user?.updatedAt);
-    final accountCreatedOn    = _formatDate(user?.createdAt);
+    // Bug 1 fix: read password_last_changed from user_metadata, not updatedAt.
+    // updatedAt changes on any profile update (name, email, etc.). The
+    // password_last_changed key is written explicitly by _updatePassword after
+    // a successful updateUser(), so it only moves when the password moves.
+    // Falls back to '—' for users who have never changed their password through
+    // this flow (e.g. OAuth-only users or pre-fix accounts).
+    final passwordLastUpdated = _formatDate(
+      user?.userMetadata?['password_last_changed'] as String?,
+    );
+    final accountCreatedOn = _formatDate(user?.createdAt);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -828,7 +1007,7 @@ class _LoginSectionState extends State<LoginSection> {
           style: ElevatedButton.styleFrom(
             backgroundColor: Colors.red,
             foregroundColor: Colors.white,
-            disabledBackgroundColor: Colors.red.withOpacity(0.5),
+            disabledBackgroundColor: Colors.red.withValues(alpha: 0.5),
           ),
           child: _isDeletingAccount
               ? const SizedBox(

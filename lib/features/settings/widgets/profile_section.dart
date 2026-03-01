@@ -509,7 +509,7 @@ class _ProfileSectionState extends State<ProfileSection> {
                 margin: const EdgeInsets.only(bottom: 32),
                 padding: const EdgeInsets.all(24),
                 decoration: BoxDecoration(
-                  color: theme.colorScheme.primaryContainer.withOpacity(0.3),
+                  color: theme.colorScheme.primaryContainer.withValues(alpha: 0.3),
                   border: Border.all(color: theme.colorScheme.primary),
                   borderRadius: BorderRadius.circular(12),
                 ),

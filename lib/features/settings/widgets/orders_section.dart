@@ -482,7 +482,7 @@ class _OrdersSectionState extends State<OrdersSection> {
                                     Container(
                                       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                                       decoration: BoxDecoration(
-                                        color: status == 'successful' ? Colors.green.withOpacity(0.1) : Colors.orange.withOpacity(0.1),
+                                        color: status == 'successful' ? Colors.green.withValues(alpha: 0.1) : Colors.orange.withValues(alpha: 0.1),
                                         borderRadius: BorderRadius.circular(12),
                                       ),
                                       child: Text(status.toUpperCase(), style: TextStyle(color: status == 'successful' ? Colors.green : Colors.orange, fontSize: 12, fontWeight: FontWeight.bold)),
