@@ -65,7 +65,7 @@ class OverviewScreen extends StatelessWidget {
               final connections = snapshot.data ?? [];
               if (connections.isEmpty) {
                 return Card(
-                  color: theme.colorScheme.primaryContainer.withOpacity(0.5),
+                  color: theme.colorScheme.primaryContainer.withValues(alpha: 0.5),
                   child: Padding(
                     padding: const EdgeInsets.all(24.0),
                     child: Column(
@@ -112,7 +112,7 @@ class OverviewScreen extends StatelessWidget {
             shrinkWrap: true,
             physics: const NeverScrollableScrollPhysics(),
             itemCount: 3,
-            separatorBuilder: (_, __) => const Divider(),
+            separatorBuilder: (_, _) => const Divider(),
             itemBuilder: (context, index) {
               return ListTile(
                 leading: const CircleAvatar(child: Icon(Icons.history)),

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/auth_service.dart';
 import '../../../shared/widgets/oauth_buttons.dart';
 import '../../../core/utils/error_handler.dart';
@@ -58,6 +59,36 @@ class _LoginScreenState extends State<LoginScreen> {
 
       if (!mounted) return;
 
+      // ── Bug 2 fix: MFA check after signInWithPassword ──────────────────
+      //
+      // signInWithPassword always returns aal1, even for MFA users.
+      // getAuthenticatorAssuranceLevel() tells us whether a step-up is needed:
+      //
+      //   nextLevel == aal2 && currentLevel == aal1
+      //     → User has a verified TOTP factor enrolled.
+      //       Send them to MfaVerifyScreen before letting them into the app.
+      //
+      //   nextLevel == aal1 (== currentLevel)
+      //     → No MFA enrolled. Proceed normally.
+      //
+      // getAuthenticatorAssuranceLevel() is fast and rarely hits the network.
+      final aal = Supabase.instance.client.auth.mfa
+          .getAuthenticatorAssuranceLevel();
+
+      if (!mounted) return;
+
+      if (aal.nextLevel?.name == 'aal2' &&
+          aal.currentLevel?.name != 'aal2') {
+        // MFA enrolled but not yet verified this session.
+        // Navigate to the dedicated MFA screen, carrying `next` through so
+        // the user lands in the right place after a successful TOTP verify.
+        final dest = _sanitizeNext(widget.next) ?? '/app/overview';
+        context.go('/mfa-verify?next=${Uri.encodeComponent(dest)}');
+        // LoginScreen is done — MfaVerifyScreen owns the rest of the flow.
+        return;
+      }
+
+      // No MFA enrolled (aal1 == aal1), proceed directly to the app.
       ErrorHandler.showSuccess(context, 'Login successful');
 
       final dest = _sanitizeNext(widget.next);

@@ -622,7 +622,7 @@ class _ProfileSectionState extends State<ProfileSection> {
             ),
             const SizedBox(height: 8),
             DropdownButtonFormField<String>(
-              value: _profile['language'] ?? 'English',
+              initialValue: _profile['language'] ?? 'English',
               decoration: const InputDecoration(border: OutlineInputBorder()),
               items: [
                 'English',
@@ -703,7 +703,7 @@ class _ProfileSectionState extends State<ProfileSection> {
                                   s,
                                   style: const TextStyle(fontSize: 12),
                                 ),
-                                backgroundColor: Colors.grey.withOpacity(0.1),
+                                backgroundColor: Colors.grey.withValues(alpha: 0.1),
                               ),
                             )
                             .toList(),
@@ -716,7 +716,7 @@ class _ProfileSectionState extends State<ProfileSection> {
               Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
-                  color: theme.colorScheme.surfaceVariant.withOpacity(0.5),
+                  color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: Row(

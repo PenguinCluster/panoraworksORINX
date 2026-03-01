@@ -8,6 +8,7 @@ import '../../features/auth/screens/signup_screen.dart';
 import '../../features/auth/screens/forgot_password_screen.dart';
 import '../../features/auth/screens/join_team_screen.dart';
 import '../../features/auth/screens/set_password_screen.dart';
+import '../../features/auth/screens/mfa_verify_screen.dart';
 import '../../features/dashboard/screens/app_shell.dart';
 import '../../features/settings/screens/settings_screen.dart';
 import '../../features/settings/screens/plans_pricing_screen.dart';
@@ -68,7 +69,11 @@ final appRouter = GoRouter(
         location == '/forgot-password' ||
         location == '/auth/callback' ||
         location == '/join-team' ||
-        location == '/set-password';
+        location == '/set-password' ||
+        // /mfa-verify sits between signInWithPassword (aal1) and the app (aal2).
+        // The user has a valid session but hasn't completed MFA yet, so treat
+        // it as public to prevent the redirect guard from looping them to /login.
+        location == '/mfa-verify';
 
     // Never redirect away from auth flow screens — they manage their own navigation.
     if (location.contains('set-password') ||
@@ -156,6 +161,16 @@ final appRouter = GoRouter(
     GoRoute(
       path: '/auth/callback',
       builder: (context, state) => const AuthCallbackPage(),
+    ),
+    GoRoute(
+      path: '/mfa-verify',
+      builder: (context, state) {
+        // next is the destination after successful TOTP verification.
+        // Passed by LoginScreen after signInWithPassword() returns aal1→aal2.
+        final next = state.uri.queryParametersAll['next']?.firstOrNull ??
+            state.uri.queryParameters['next'];
+        return MfaVerifyScreen(next: next);
+      },
     ),
     GoRoute(
       path: '/join-team',

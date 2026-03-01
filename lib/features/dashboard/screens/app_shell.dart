@@ -25,7 +25,7 @@ class AppShell extends StatelessWidget {
           if (!isMobile) const _Sidebar(),
           Expanded(
             child: Container(
-              color: theme.colorScheme.surfaceVariant.withOpacity(0.1),
+              color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.1),
               child: SafeArea(child: child),
             ),
           ),
@@ -134,7 +134,7 @@ class _ProfileSection extends StatelessWidget {
           padding: const EdgeInsets.all(16.0),
           child: Container(
             decoration: BoxDecoration(
-              color: theme.colorScheme.surfaceVariant.withOpacity(0.3),
+              color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
               borderRadius: BorderRadius.circular(12),
             ),
             child: Theme(
@@ -169,7 +169,9 @@ class _ProfileSection extends StatelessWidget {
                       title: const Text('Settings'),
                       onTap: () {
                         if (MediaQuery.of(context).size.width < 900)
-                          Navigator.pop(context);
+                          {
+                            Navigator.pop(context);
+                          }
                         context.go('/app/settings');
                       },
                     ),

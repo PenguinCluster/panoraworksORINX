@@ -265,6 +265,10 @@ class _LoginSectionState extends State<LoginSection> {
         // Show step-up dialog; do NOT call signInWithPassword.
         setState(() => _isUpdatingPassword = false); // release lock during dialog
         final steppedUp = await _showMfaStepUpDialog();
+        // Bug 1 fix: widget may have been disposed while the step-up dialog
+        // was open (e.g. user navigated away via back gesture). Check mounted
+        // before every setState / context access that follows an await.
+        if (!mounted) return false;
         if (!steppedUp) return false; // user cancelled
         setState(() => _isUpdatingPassword = true);
         // Session is now aal2 — fall through to updateUser below.
@@ -606,14 +610,19 @@ class _LoginSectionState extends State<LoginSection> {
 
     try {
       // ── Step 1: Invoke the Edge Function ──────────────────────────────
-      // Bug 2 fix: explicitly include the Authorization header.
-      // The Supabase Flutter SDK does not always forward the session token
-      // automatically to functions.invoke() — passing it explicitly is
-      // the reliable cross-version approach.
-      final token    = _supabase.auth.currentSession?.accessToken ?? '';
+      // Bug 3 fix (Flutter side):
+      //   - Guard against a null session before invoking. If accessToken is
+      //     null we'd silently send "Bearer " with no token, which the gateway
+      //     always rejects. Surfacing this early gives a clear error message.
+      //   - Pass the Authorization header explicitly — the Supabase Flutter SDK
+      //     does not guarantee forwarding it automatically across all versions.
+      final session = _supabase.auth.currentSession;
+      if (session == null) {
+        throw Exception('No active session — please sign in again.');
+      }
       final response = await _supabase.functions.invoke(
         'export-user-data',
-        headers: {'Authorization': 'Bearer $token'},
+        headers: {'Authorization': 'Bearer ${session.accessToken}'},
       );
 
       if (response.status != 200) {
@@ -646,7 +655,7 @@ class _LoginSectionState extends State<LoginSection> {
       await FileSaver.instance.saveFile(
         name:     filename,
         bytes:    bytes,
-        fileExtension:'json',
+        fileExtension:      'json',
         mimeType: MimeType.json,
       );
 
@@ -745,7 +754,11 @@ class _LoginSectionState extends State<LoginSection> {
         supabase: _supabase,
         onEnrolled: () {
           Navigator.pop(dialogContext);
-          _loadMfaStatus(); // refresh the MFA row
+          _loadMfaStatus();
+          // Bug 1 fix: Navigator.pop closes the dialog, but the parent widget
+          // (LoginSection) could theoretically have been disposed in the same
+          // frame (e.g. rapid navigation). Guard before accessing context.
+          if (!mounted) return;
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
               content: Text('Authenticator app enabled.'),
@@ -759,9 +772,30 @@ class _LoginSectionState extends State<LoginSection> {
   }
 
   /// Confirms then unenrolls the active TOTP factor.
-  void _showUnenrollMfaDialog() {
+  ///
+  /// Bug 2 fix — WHY unenroll needs aal2:
+  /// Supabase requires the session to be at aal2 before it will accept
+  /// unenroll(). This is intentional: without this requirement, anyone who
+  /// unlocks a logged-in phone could silently disable MFA. The step-up dialog
+  /// proves the user still has access to their authenticator app before we
+  /// remove it. Only THEN do we show the final confirmation + call unenroll().
+  Future<void> _showUnenrollMfaDialog() async {
     final factor = _enrolledFactor;
     if (factor == null) return;
+
+    // ── Step-up check ──────────────────────────────────────────────────────
+    // getAuthenticatorAssuranceLevel() is fast (rarely hits the network).
+    final aal = _supabase.auth.mfa.getAuthenticatorAssuranceLevel();
+    if (!mounted) return;
+
+    if (aal.currentLevel?.name != 'aal2') {
+      // Session is aal1 — show TOTP step-up dialog first.
+      // If the user cancels or enters the wrong code, we bail out entirely;
+      // the unenroll confirmation dialog is never shown.
+      final steppedUp = await _showMfaStepUpDialog();
+      if (!mounted || !steppedUp) return;
+    }
+    // Session is now guaranteed aal2. Show the unenroll confirmation.
 
     showDialog(
       context: context,

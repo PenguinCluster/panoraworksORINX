@@ -17,14 +17,14 @@ class AuthService {
       email: email,
       password: password,
       data: {
-        if (username != null) 'username': username,
-        if (fullName != null) 'full_name': fullName,
-      },
+        'username': username, // Remove the 'if' and the key-value pair will 
+        'full_name': fullName, // still be null if the variables are null.
+      }..removeWhere((key, value) => value == null), // Optional: clean up nulls
       emailRedirectTo: emailRedirectTo,
     );
     AppLogger.info('Signup successful for $email');
     return response;
-  }
+}
 
   // Sign in with email and password
   Future<AuthResponse> signIn({

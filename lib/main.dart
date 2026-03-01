@@ -118,12 +118,12 @@ class OrinxApp extends StatelessWidget {
     final colorScheme = ColorScheme.fromSeed(
       seedColor: seedColor,
       brightness: brightness,
-      background: highContrast ? (isDark ? Colors.black : Colors.white) : null,
+      surface: highContrast ? (isDark ? Colors.black : Colors.white) : null,
     );
 
     return baseTheme.copyWith(
       colorScheme: colorScheme,
-      useMaterial3: true,
+      // useMaterial3: true, // deprecated after v3.13.0-0.2.pre; ThemeData constructor now handles this
       pageTransitionsTheme: settings.reduceMotion
           ? const PageTransitionsTheme(
               builders: {

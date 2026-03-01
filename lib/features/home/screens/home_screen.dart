@@ -152,7 +152,7 @@ class _FeaturesSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      color: Theme.of(context).colorScheme.surfaceContainerHighest.withOpacity(0.3),
+      color: Theme.of(context).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
       padding: EdgeInsets.symmetric(
         horizontal: isDesktop ? 80 : 20,
         vertical: 80,
