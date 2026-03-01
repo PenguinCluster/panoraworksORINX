@@ -1,7 +1,16 @@
 // DEPENDENCIES REQUIRED (add to pubspec.yaml if not already present):
 //   flutter_svg: ^2.0.0     ← renders the SVG QR code Supabase returns
 //   intl: ^0.19.0           ← date formatting (Phase 1)
+//   file_saver: ^0.5.1      ← cross-platform file save (web download + mobile)
+//
+// ANDROID: add to android/app/src/main/AndroidManifest.xml inside <manifest>:
+//   <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+//                    android:maxSdkVersion="28"/>
+// (Only needed on Android ≤ 9. Android 10+ writes to Downloads without it.)
 
+import 'dart:convert';
+import 'package:file_saver/file_saver.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
@@ -23,6 +32,7 @@ class _LoginSectionState extends State<LoginSection> {
   bool _isSigningOut       = false;
   bool _isUpdatingPassword = false;
   bool _isDeletingAccount  = false;
+  bool _isExporting        = false;
 
   // ── MFA state (Phase 4) ───────────────────────────────────────────────────
   //
@@ -399,6 +409,112 @@ class _LoginSectionState extends State<LoginSection> {
     }
   }
 
+  // ─── Phase 5: Data Export ─────────────────────────────────────────────────
+  //
+  // FLOW:
+  //   1. Call export-user-data Edge Function → returns JSON bytes.
+  //   2. Read the filename from Content-Disposition response header.
+  //   3. Save the file via file_saver:
+  //        • Web    → triggers a browser "Save As" / automatic download.
+  //        • Mobile → writes to Downloads (Android) or Documents (iOS),
+  //                   accessible from the device's Files app.
+  //        • Desktop → writes to the system Downloads folder.
+  //
+  // WHY file_saver over path_provider + share_plus:
+  //   file_saver handles all three platforms in one call without needing
+  //   a share sheet. The user gets a file in a predictable location rather
+  //   than being asked "share with…" — more appropriate for a data export.
+  //
+  // ERROR HANDLING:
+  //   The Edge Function includes a _partial_errors key if any individual
+  //   table query failed. We still save the file (partial data is better
+  //   than none) but show a SnackBar warning so the user knows.
+
+  Future<void> _exportData() async {
+    setState(() => _isExporting = true);
+
+    try {
+      // ── Step 1: Invoke the Edge Function ──────────────────────────────
+      // functions.invoke() returns a FunctionResponse with:
+      //   .data   → decoded response body (dynamic — Map or String)
+      //   .status → HTTP status code
+      //
+      // We need the raw bytes to pass to file_saver, so we re-encode
+      // the decoded body back to UTF-8 bytes. This avoids the complexity
+      // of using http.Client directly while staying within the Supabase SDK.
+      final response =
+          await _supabase.functions.invoke('export-user-data');
+
+      if (response.status != 200) {
+        final errMsg = (response.data is Map)
+            ? (response.data['error'] as String? ?? 'Export failed.')
+            : 'Export failed (status ${response.status}).';
+        throw Exception(errMsg);
+      }
+
+      // ── Step 2: Encode to bytes ────────────────────────────────────────
+      // response.data is already parsed JSON (a Map). Re-encode it to a
+      // pretty-printed UTF-8 byte array for the file.
+      final jsonString = const JsonEncoder.withIndent('  ')
+          .convert(response.data);
+      final bytes = utf8.encode(jsonString);
+
+      // ── Step 3: Build filename from today's date ───────────────────────
+      final dateSlug = DateFormat('yyyy-MM-dd').format(DateTime.now());
+      final filename  = 'orinx-data-export-$dateSlug';
+
+      // ── Step 4: Save the file ──────────────────────────────────────────
+      // file_saver API:
+      //   name      → filename without extension
+      //   bytes     → Uint8List content
+      //   ext       → extension without leading dot
+      //   mimeType  → MimeType enum value
+      //
+      // On web this immediately triggers a browser download.
+      // On mobile/desktop it writes to the platform Downloads folder.
+      await FileSaver.instance.saveFile(
+        name:     filename,
+        bytes:    bytes,
+        fileExtension:      'json',
+        mimeType: MimeType.json,
+      );
+
+      if (!mounted) return;
+
+      // Surface a warning if the export is partial (some tables failed).
+      final hasPartialErrors = (response.data is Map) &&
+          (response.data as Map).containsKey('_partial_errors');
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            hasPartialErrors
+                ? 'Data exported with warnings — some sections may be incomplete. '
+                  'Check the _partial_errors key in the file for details.'
+                : kIsWeb
+                    ? 'Download started: $filename.json'
+                    : 'Saved to your Downloads folder: $filename.json',
+          ),
+          backgroundColor: hasPartialErrors ? Colors.orange : null,
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 5),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      final message = e.toString().replaceFirst('Exception: ', '');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Export failed: $message'),
+          backgroundColor: Colors.red,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _isExporting = false);
+    }
+  }
+
   // ─── Phase 4: MFA ─────────────────────────────────────────────────────────
   //
   // ENROLLMENT FLOW (three mandatory steps per Supabase Auth):
@@ -685,8 +801,14 @@ class _LoginSectionState extends State<LoginSection> {
         ListTile(
           contentPadding: EdgeInsets.zero,
           title: const Text('Request to download data'),
-          trailing: const Icon(Icons.download),
-          onTap: () {},
+          trailing: _isExporting
+              ? const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.download),
+          onTap: _isExporting ? null : _exportData,
         ),
         const Divider(height: 48),
 
