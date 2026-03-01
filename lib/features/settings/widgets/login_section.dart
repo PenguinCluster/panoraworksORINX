@@ -1,4 +1,10 @@
+// DEPENDENCIES REQUIRED (add to pubspec.yaml if not already present):
+//   flutter_svg: ^2.0.0     ← renders the SVG QR code Supabase returns
+//   intl: ^0.19.0           ← date formatting (Phase 1)
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:intl/intl.dart';
@@ -13,11 +19,30 @@ class LoginSection extends StatefulWidget {
 
 class _LoginSectionState extends State<LoginSection> {
   final _supabase = Supabase.instance.client;
-  bool _isSigningOut    = false;
+
+  bool _isSigningOut       = false;
   bool _isUpdatingPassword = false;
   bool _isDeletingAccount  = false;
 
-  // ── Date helpers (Phase 1) ──────────────────────────────────────────────────
+  // ── MFA state (Phase 4) ───────────────────────────────────────────────────
+  //
+  // We track the user's enrolled TOTP factor so the MFA row shows
+  // "Enable" vs "Disable" and the correct action on tap.
+  //
+  // _mfaLoading is true only during the initial listFactors() call on initState
+  // and during unenroll. The enrollment dialog manages its own internal loading
+  // state via StatefulBuilder so the main screen does not grey out while the
+  // user is scanning the QR code.
+  bool              _mfaLoading = true;
+  dynamic        _enrolledFactor; // non-null = MFA is active for this user
+
+  @override
+  void initState() {
+    super.initState();
+    _loadMfaStatus();
+  }
+
+  // ─── Phase 1 helpers ──────────────────────────────────────────────────────
 
   String _formatDate(String? isoString) {
     if (isoString == null || isoString.isEmpty) return '—';
@@ -29,7 +54,7 @@ class _LoginSectionState extends State<LoginSection> {
     }
   }
 
-  // ── Sign out other devices (Phase 1) ───────────────────────────────────────
+  // ─── Phase 1: sign out other devices ──────────────────────────────────────
 
   Future<void> _signOutOtherDevices() async {
     setState(() => _isSigningOut = true);
@@ -58,7 +83,7 @@ class _LoginSectionState extends State<LoginSection> {
     }
   }
 
-  // ── Update Password (Phase 2) ───────────────────────────────────────────────
+  // ─── Phase 2: update password ──────────────────────────────────────────────
 
   void _showUpdatePasswordDialog() {
     final currentPasswordCtrl = TextEditingController();
@@ -75,118 +100,118 @@ class _LoginSectionState extends State<LoginSection> {
         bool obscureConfirm = true;
         bool isLoading      = false;
 
-        return StatefulBuilder(
-          builder: (context, setDialogState) {
-            return AlertDialog(
-              title: const Text('Update Password'),
-              content: SingleChildScrollView(
-                child: Form(
-                  key: formKey,
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      TextFormField(
-                        controller: currentPasswordCtrl,
-                        obscureText: obscureCurrent,
-                        decoration: InputDecoration(
-                          labelText: 'Current password',
-                          border: const OutlineInputBorder(),
-                          prefixIcon: const Icon(Icons.lock_outline),
-                          suffixIcon: IconButton(
-                            icon: Icon(obscureCurrent
-                                ? Icons.visibility_off
-                                : Icons.visibility),
-                            onPressed: () => setDialogState(
-                                () => obscureCurrent = !obscureCurrent),
-                          ),
+        return StatefulBuilder(builder: (context, setDS) {
+          return AlertDialog(
+            title: const Text('Update Password'),
+            content: SingleChildScrollView(
+              child: Form(
+                key: formKey,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TextFormField(
+                      controller: currentPasswordCtrl,
+                      obscureText: obscureCurrent,
+                      decoration: InputDecoration(
+                        labelText: 'Current password',
+                        border: const OutlineInputBorder(),
+                        prefixIcon: const Icon(Icons.lock_outline),
+                        suffixIcon: IconButton(
+                          icon: Icon(obscureCurrent
+                              ? Icons.visibility_off
+                              : Icons.visibility),
+                          onPressed: () =>
+                              setDS(() => obscureCurrent = !obscureCurrent),
                         ),
-                        validator: (v) => (v == null || v.isEmpty)
-                            ? 'Enter your current password'
-                            : null,
                       ),
-                      const SizedBox(height: 16),
-                      TextFormField(
-                        controller: newPasswordCtrl,
-                        obscureText: obscureNew,
-                        decoration: InputDecoration(
-                          labelText: 'New password',
-                          border: const OutlineInputBorder(),
-                          prefixIcon: const Icon(Icons.lock),
-                          suffixIcon: IconButton(
-                            icon: Icon(obscureNew
-                                ? Icons.visibility_off
-                                : Icons.visibility),
-                            onPressed: () => setDialogState(
-                                () => obscureNew = !obscureNew),
-                          ),
+                      validator: (v) => (v == null || v.isEmpty)
+                          ? 'Enter your current password'
+                          : null,
+                    ),
+                    const SizedBox(height: 16),
+                    TextFormField(
+                      controller: newPasswordCtrl,
+                      obscureText: obscureNew,
+                      decoration: InputDecoration(
+                        labelText: 'New password',
+                        border: const OutlineInputBorder(),
+                        prefixIcon: const Icon(Icons.lock),
+                        suffixIcon: IconButton(
+                          icon: Icon(obscureNew
+                              ? Icons.visibility_off
+                              : Icons.visibility),
+                          onPressed: () =>
+                              setDS(() => obscureNew = !obscureNew),
                         ),
-                        validator: (v) {
-                          if (v == null || v.isEmpty) return 'Enter a new password';
-                          if (v.length < 8) return 'Password must be at least 8 characters';
-                          if (v == currentPasswordCtrl.text) {
-                            return 'New password must differ from current';
-                          }
-                          return null;
-                        },
                       ),
-                      const SizedBox(height: 16),
-                      TextFormField(
-                        controller: confirmPasswordCtrl,
-                        obscureText: obscureConfirm,
-                        decoration: InputDecoration(
-                          labelText: 'Confirm new password',
-                          border: const OutlineInputBorder(),
-                          prefixIcon: const Icon(Icons.check_circle_outline),
-                          suffixIcon: IconButton(
-                            icon: Icon(obscureConfirm
-                                ? Icons.visibility_off
-                                : Icons.visibility),
-                            onPressed: () => setDialogState(
-                                () => obscureConfirm = !obscureConfirm),
-                          ),
+                      validator: (v) {
+                        if (v == null || v.isEmpty) return 'Enter a new password';
+                        if (v.length < 8) {
+                          return 'Password must be at least 8 characters';
+                        }
+                        if (v == currentPasswordCtrl.text) {
+                          return 'New password must differ from current';
+                        }
+                        return null;
+                      },
+                    ),
+                    const SizedBox(height: 16),
+                    TextFormField(
+                      controller: confirmPasswordCtrl,
+                      obscureText: obscureConfirm,
+                      decoration: InputDecoration(
+                        labelText: 'Confirm new password',
+                        border: const OutlineInputBorder(),
+                        prefixIcon: const Icon(Icons.check_circle_outline),
+                        suffixIcon: IconButton(
+                          icon: Icon(obscureConfirm
+                              ? Icons.visibility_off
+                              : Icons.visibility),
+                          onPressed: () =>
+                              setDS(() => obscureConfirm = !obscureConfirm),
                         ),
-                        validator: (v) => v != newPasswordCtrl.text
-                            ? 'Passwords do not match'
-                            : null,
                       ),
-                    ],
-                  ),
+                      validator: (v) => v != newPasswordCtrl.text
+                          ? 'Passwords do not match'
+                          : null,
+                    ),
+                  ],
                 ),
               ),
-              actions: [
-                TextButton(
-                  onPressed: isLoading
-                      ? null
-                      : () => Navigator.pop(dialogContext),
-                  child: const Text('Cancel'),
-                ),
-                FilledButton(
-                  onPressed: isLoading
-                      ? null
-                      : () async {
-                          if (!formKey.currentState!.validate()) return;
-                          setDialogState(() => isLoading = true);
-                          final success = await _updatePassword(
-                            currentPassword: currentPasswordCtrl.text,
-                            newPassword: newPasswordCtrl.text,
-                          );
-                          if (!dialogContext.mounted) return;
-                          setDialogState(() => isLoading = false);
-                          if (success) Navigator.pop(dialogContext);
-                        },
-                  child: isLoading
-                      ? const SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(
-                              strokeWidth: 2, color: Colors.white),
-                        )
-                      : const Text('Update'),
-                ),
-              ],
-            );
-          },
-        );
+            ),
+            actions: [
+              TextButton(
+                onPressed: isLoading
+                    ? null
+                    : () => Navigator.pop(dialogContext),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: isLoading
+                    ? null
+                    : () async {
+                        if (!formKey.currentState!.validate()) return;
+                        setDS(() => isLoading = true);
+                        final ok = await _updatePassword(
+                          currentPassword: currentPasswordCtrl.text,
+                          newPassword: newPasswordCtrl.text,
+                        );
+                        if (!dialogContext.mounted) return;
+                        setDS(() => isLoading = false);
+                        if (ok) Navigator.pop(dialogContext);
+                      },
+                child: isLoading
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.white),
+                      )
+                    : const Text('Update'),
+              ),
+            ],
+          );
+        });
       },
     ).whenComplete(() {
       currentPasswordCtrl.dispose();
@@ -203,11 +228,9 @@ class _LoginSectionState extends State<LoginSection> {
     try {
       final email = _supabase.auth.currentUser?.email;
       if (email == null) throw const AuthException('No authenticated user.');
-
-      await _supabase.auth.signInWithPassword(
-          email: email, password: currentPassword);
+      await _supabase.auth
+          .signInWithPassword(email: email, password: currentPassword);
       await _supabase.auth.updateUser(UserAttributes(password: newPassword));
-
       if (mounted) {
         setState(() {});
         ScaffoldMessenger.of(context).showSnackBar(
@@ -238,186 +261,126 @@ class _LoginSectionState extends State<LoginSection> {
     }
   }
 
-  // ── Delete Account (Phase 3) ────────────────────────────────────────────────
-  //
-  // WHY an Edge Function is required:
-  //   The client-side Supabase SDK has no deleteUser() method. Only the Admin
-  //   API (service-role key) can remove a row from auth.users. Exposing the
-  //   service-role key in the Flutter app is a critical security risk, so the
-  //   deletion must go through a server-side Edge Function (delete-account v1)
-  //   that holds the key in a Deno environment variable.
-  //
-  // CALL ORDER — why we invoke the function BEFORE signing out locally:
-  //   1. Call delete-account (uses the current valid JWT to authenticate).
-  //   2. Edge Function deletes the auth.users row → Postgres cascade removes
-  //      all public-schema data atomically.
-  //   3. Sign out locally (SignOutScope.local) to clear the device token.
-  //      We don't need SignOutScope.global here because the user row is gone;
-  //      all other sessions will fail on next use automatically.
-  //   4. Clear TeamContextController in-memory state (ProfileManager
-  //      self-clears via its onAuthStateChange(signedOut) listener).
-  //   5. Navigate to /login.
-  //
-  //   If we called signOut() first, the JWT would be revoked before the Edge
-  //   Function could authenticate the request → 401.
+  // ─── Phase 3: delete account ───────────────────────────────────────────────
 
   void _showDeleteAccountDialog() {
-    final confirmCtrl = TextEditingController();
+    final confirmCtrl   = TextEditingController();
+    const confirmWord   = 'DELETE';
 
     showDialog(
       context: context,
       barrierDismissible: false,
       builder: (dialogContext) {
-        bool isLoading      = false;
-        bool inputMatches   = false;
-        const confirmWord   = 'DELETE';
+        bool isLoading    = false;
+        bool inputMatches = false;
 
-        return StatefulBuilder(
-          builder: (context, setDialogState) {
-            return AlertDialog(
-              title: Row(
+        return StatefulBuilder(builder: (context, setDS) {
+          return AlertDialog(
+            title: Row(children: [
+              Icon(Icons.warning_amber_rounded, color: Colors.red.shade700),
+              const SizedBox(width: 8),
+              const Text('Delete Account'),
+            ]),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Icon(Icons.warning_amber_rounded,
-                      color: Colors.red.shade700),
-                  const SizedBox(width: 8),
-                  const Text('Delete Account'),
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.red.shade50,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.red.shade200),
+                    ),
+                    child: const Text(
+                      'This action is permanent and cannot be undone. '
+                      'Your account, workspace, all team data, and billing '
+                      'history will be deleted immediately.',
+                      style: TextStyle(color: Colors.red),
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  RichText(
+                    text: TextSpan(
+                      style: Theme.of(context).textTheme.bodyMedium,
+                      children: const [
+                        TextSpan(text: 'Type '),
+                        TextSpan(
+                          text: confirmWord,
+                          style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontFamily: 'monospace'),
+                        ),
+                        TextSpan(text: ' to confirm:'),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: confirmCtrl,
+                    enabled: !isLoading,
+                    autofocus: true,
+                    autocorrect: false,
+                    decoration: InputDecoration(
+                      hintText: confirmWord,
+                      border: const OutlineInputBorder(),
+                      errorText:
+                          confirmCtrl.text.isNotEmpty && !inputMatches
+                              ? 'Type DELETE in capitals'
+                              : null,
+                    ),
+                    onChanged: (v) =>
+                        setDS(() => inputMatches = v == confirmWord),
+                  ),
                 ],
               ),
-              content: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // Severity warning
-                    Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: Colors.red.shade50,
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: Colors.red.shade200),
-                      ),
-                      child: const Text(
-                        'This action is permanent and cannot be undone. '
-                        'Your account, workspace, all team data, and billing '
-                        'history will be deleted immediately.',
-                        style: TextStyle(color: Colors.red),
-                      ),
-                    ),
-                    const SizedBox(height: 20),
-                    // Typed confirmation — prevents accidental taps on mobile
-                    // and makes the user consciously acknowledge the action.
-                    RichText(
-                      text: TextSpan(
-                        style: Theme.of(context).textTheme.bodyMedium,
-                        children: const [
-                          TextSpan(text: 'Type '),
-                          TextSpan(
-                            text: confirmWord,
-                            style: TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontFamily: 'monospace',
-                            ),
-                          ),
-                          TextSpan(text: ' to confirm:'),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    TextField(
-                      controller: confirmCtrl,
-                      enabled: !isLoading,
-                      autofocus: true,
-                      autocorrect: false,
-                      decoration: InputDecoration(
-                        hintText: confirmWord,
-                        border: const OutlineInputBorder(),
-                        errorText: confirmCtrl.text.isNotEmpty && !inputMatches
-                            ? 'Type DELETE in capitals'
-                            : null,
-                      ),
-                      onChanged: (v) => setDialogState(
-                          () => inputMatches = v == confirmWord),
-                    ),
-                  ],
-                ),
+            ),
+            actions: [
+              TextButton(
+                onPressed:
+                    isLoading ? null : () => Navigator.pop(dialogContext),
+                child: const Text('Cancel'),
               ),
-              actions: [
-                TextButton(
-                  onPressed: isLoading
-                      ? null
-                      : () => Navigator.pop(dialogContext),
-                  child: const Text('Cancel'),
-                ),
-                FilledButton(
-                  // Active only when the user has typed DELETE exactly.
-                  onPressed: (inputMatches && !isLoading)
-                      ? () async {
-                          setDialogState(() => isLoading = true);
-                          final success = await _deleteAccount();
-                          if (!dialogContext.mounted) return;
-                          // On success the screen is already gone; we only
-                          // need to handle failure (dialog stays open).
-                          if (!success) {
-                            setDialogState(() => isLoading = false);
-                          }
-                        }
-                      : null,
-                  style: FilledButton.styleFrom(
-                      backgroundColor: Colors.red),
-                  child: isLoading
-                      ? const SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(
-                              strokeWidth: 2, color: Colors.white),
-                        )
-                      : const Text('Delete my account'),
-                ),
-              ],
-            );
-          },
-        );
+              FilledButton(
+                onPressed: (inputMatches && !isLoading)
+                    ? () async {
+                        setDS(() => isLoading = true);
+                        final ok = await _deleteAccount();
+                        if (!dialogContext.mounted) return;
+                        if (!ok) setDS(() => isLoading = false);
+                      }
+                    : null,
+                style: FilledButton.styleFrom(backgroundColor: Colors.red),
+                child: isLoading
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.white),
+                      )
+                    : const Text('Delete my account'),
+              ),
+            ],
+          );
+        });
       },
     ).whenComplete(confirmCtrl.dispose);
   }
 
-  /// Calls the delete-account Edge Function, signs out locally, clears
-  /// in-memory state, and navigates to /login.
-  ///
-  /// Returns true on success (caller can close any dialogs / navigate away),
-  /// false on failure (caller keeps the confirmation dialog open).
   Future<bool> _deleteAccount() async {
     setState(() => _isDeletingAccount = true);
-
     try {
-      // Step 1 — Call the Edge Function with the current JWT.
-      //   The function authenticates the caller, then uses the service-role
-      //   key server-side to call admin.deleteUser(). This triggers the full
-      //   Postgres cascade chain, atomically removing all public-schema rows.
-      final response = await _supabase.functions.invoke('delete-account');
-
+      final response =
+          await _supabase.functions.invoke('delete-account');
       if (response.status != 200) {
         final error = response.data?['error'] as String?
             ?? 'Account deletion failed. Please try again.';
         throw Exception(error);
       }
-
-      // Step 2 — Clear the local session token.
-      //   SignOutScope.local only clears the on-device token; no server call.
-      //   The auth.users row is already gone so SignOutScope.global is both
-      //   unnecessary and would return an error on the revoke endpoint.
       await _supabase.auth.signOut(scope: SignOutScope.local);
-
-      // Step 3 — Clear in-memory state.
-      //   TeamContextController must be cleared manually.
-      //   ProfileManager self-clears via its onAuthStateChange(signedOut)
-      //   listener that fired when signOut() was called above.
       TeamContextController.instance.clear();
-
-      // Step 4 — Navigate to /login and replace the entire navigation stack
-      //   so the user cannot press Back to return to the deleted account's UI.
       if (mounted) context.go('/login');
-
       return true;
     } catch (e) {
       final message = e.toString().replaceFirst('Exception: ', '');
@@ -436,7 +399,154 @@ class _LoginSectionState extends State<LoginSection> {
     }
   }
 
-  // ── Build ───────────────────────────────────────────────────────────────────
+  // ─── Phase 4: MFA ─────────────────────────────────────────────────────────
+  //
+  // ENROLLMENT FLOW (three mandatory steps per Supabase Auth):
+  //
+  //   Step 1 — enroll()
+  //     Creates an unverified factor in auth.mfa_factors with status='unverified'.
+  //     Returns: factorId (UUID), totp.qrCode (SVG string), totp.secret (base32).
+  //     The QR code encodes an otpauth:// URI the authenticator app reads.
+  //
+  //   Step 2 — challenge()
+  //     Prepares Supabase Auth to accept a TOTP code for this factor.
+  //     Returns: challengeId (UUID). Challenges expire after ~10 minutes.
+  //     A new challenge must be created each time the user clicks "Verify"
+  //     (if they mistype and retry, challenge() is called again — see dialog).
+  //
+  //   Step 3 — verify()
+  //     Submits the 6-digit code from the authenticator app.
+  //     On success: factor status → 'verified', session AAL → aal2.
+  //     On failure: throws AuthException — keep the dialog open, let user retry.
+  //
+  // UNENROLL FLOW:
+  //   unenroll() removes the factor and downgrades AAL from aal2 to aal1.
+  //   We call refreshSession() immediately after to force the JWT to reflect
+  //   the downgrade without waiting for the next token refresh cycle.
+
+  /// Fetches the user's verified TOTP factors and updates [_enrolledFactor].
+  /// Called on initState and after successful enroll/unenroll.
+  Future<void> _loadMfaStatus() async {
+    setState(() => _mfaLoading = true);
+    try {
+      final result = await _supabase.auth.mfa.listFactors();
+      if (mounted) {
+        // We only care about verified TOTP factors — unverified ones mean a
+        // previous enrollment was abandoned mid-flow and should be ignored.
+        final verified = result.totp
+            .where((f) => f.status == FactorStatus.verified)
+            .toList();
+        setState(() => _enrolledFactor = verified.isNotEmpty ? verified.first : null);
+      }
+    } catch (_) {
+      // Non-fatal: if listFactors fails (e.g. offline) we show "Enable"
+      // as the safe default. The user can tap it and get a proper error then.
+      if (mounted) setState(() => _enrolledFactor = null);
+    } finally {
+      if (mounted) setState(() => _mfaLoading = false);
+    }
+  }
+
+  /// Opens the enrollment dialog.
+  /// Calls enroll() immediately on open to get the QR code, then walks the
+  /// user through scanning and entering their first TOTP code to verify.
+  void _showEnrollMfaDialog() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => _MfaEnrollDialog(
+        supabase: _supabase,
+        onEnrolled: () {
+          Navigator.pop(dialogContext);
+          _loadMfaStatus(); // refresh the MFA row
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Authenticator app enabled.'),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        },
+        onCancelled: () => Navigator.pop(dialogContext),
+      ),
+    );
+  }
+
+  /// Confirms then unenrolls the active TOTP factor.
+  void _showUnenrollMfaDialog() {
+    final factor = _enrolledFactor;
+    if (factor == null) return;
+
+    showDialog(
+      context: context,
+      builder: (dialogContext) {
+        bool isLoading = false;
+        return StatefulBuilder(builder: (context, setDS) {
+          return AlertDialog(
+            title: const Text('Disable Authenticator App'),
+            content: const Text(
+              'This will remove two-factor authentication from your account. '
+              'You will only need your password to log in.',
+            ),
+            actions: [
+              TextButton(
+                onPressed:
+                    isLoading ? null : () => Navigator.pop(dialogContext),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: isLoading
+                    ? null
+                    : () async {
+                        setDS(() => isLoading = true);
+                        try {
+                          await _supabase.auth.mfa
+                              .unenroll(factor.id);
+                          // Force immediate JWT downgrade from aal2 → aal1.
+                          // Without this the stale JWT keeps aal2 until it
+                          // naturally expires (~1 hour).
+                          await _supabase.auth.refreshSession();
+                          if (!dialogContext.mounted) return;
+                          Navigator.pop(dialogContext);
+                          _loadMfaStatus();
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text(
+                                    'Two-factor authentication disabled.'),
+                                behavior: SnackBarBehavior.floating,
+                              ),
+                            );
+                          }
+                        } on AuthException catch (e) {
+                          if (!dialogContext.mounted) return;
+                          setDS(() => isLoading = false);
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(e.message),
+                              backgroundColor: Colors.red,
+                              behavior: SnackBarBehavior.floating,
+                            ),
+                          );
+                        }
+                      },
+                style: FilledButton.styleFrom(backgroundColor: Colors.red),
+                child: isLoading
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.white),
+                      )
+                    : const Text('Disable'),
+              ),
+            ],
+          );
+        });
+      },
+    );
+  }
+
+  // ─── Build ─────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
@@ -449,14 +559,12 @@ class _LoginSectionState extends State<LoginSection> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          'Login',
-          style: theme.textTheme.headlineSmall
-              ?.copyWith(fontWeight: FontWeight.bold),
-        ),
+        Text('Login',
+            style: theme.textTheme.headlineSmall
+                ?.copyWith(fontWeight: FontWeight.bold)),
         const SizedBox(height: 32),
 
-        // ── Password ────────────────────────────────────────────────────────
+        // ── Password ──────────────────────────────────────────────────────
         _buildSectionTitle(context, 'Password'),
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -471,7 +579,7 @@ class _LoginSectionState extends State<LoginSection> {
         ),
         const Divider(),
 
-        // ── Passkey ─────────────────────────────────────────────────────────
+        // ── Passkey ───────────────────────────────────────────────────────
         _buildSectionTitle(context, 'Passkey'),
         const Text(
           'Use your fingerprint, face, or screen lock to log in without '
@@ -488,20 +596,68 @@ class _LoginSectionState extends State<LoginSection> {
         ),
         const Divider(height: 48),
 
-        // ── MFA ─────────────────────────────────────────────────────────────
+        // ── MFA (Phase 4) ──────────────────────────────────────────────────
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            const Text(
-              'Multi-factor authentication (MFA)',
-              style: TextStyle(fontWeight: FontWeight.bold),
+            Row(
+              children: [
+                const Text(
+                  'Multi-factor authentication (MFA)',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                // Green badge when MFA is active so the user can see at a
+                // glance that their account is protected.
+                if (_enrolledFactor != null) ...[
+                  const SizedBox(width: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 8, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: Colors.green.shade100,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.check_circle,
+                            size: 12, color: Colors.green.shade700),
+                        const SizedBox(width: 4),
+                        Text(
+                          'Enabled',
+                          style: TextStyle(
+                            color: Colors.green.shade700,
+                            fontSize: 11,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ],
             ),
-            TextButton(onPressed: () {}, child: const Text('Enable')),
+            _mfaLoading
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : TextButton(
+                    onPressed: _enrolledFactor != null
+                        ? _showUnenrollMfaDialog
+                        : _showEnrollMfaDialog,
+                    style: _enrolledFactor != null
+                        ? TextButton.styleFrom(foregroundColor: Colors.red)
+                        : null,
+                    child: Text(
+                        _enrolledFactor != null ? 'Disable' : 'Enable'),
+                  ),
           ],
         ),
         const Divider(),
 
-        // ── Sign out other devices ───────────────────────────────────────────
+        // ── Sign out other devices ──────────────────────────────────────────
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
@@ -520,7 +676,7 @@ class _LoginSectionState extends State<LoginSection> {
         ),
         const Divider(),
 
-        // ── Data download ────────────────────────────────────────────────────
+        // ── Data download ─────────────────────────────────────────────────
         ListTile(
           contentPadding: EdgeInsets.zero,
           title: const Text('Request to download data'),
@@ -529,7 +685,7 @@ class _LoginSectionState extends State<LoginSection> {
         ),
         const Divider(height: 48),
 
-        // ── Delete account ───────────────────────────────────────────────────
+        // ── Delete account ────────────────────────────────────────────────
         Text(
           'Delete account',
           style: theme.textTheme.titleMedium?.copyWith(
@@ -563,10 +719,401 @@ class _LoginSectionState extends State<LoginSection> {
   Widget _buildSectionTitle(BuildContext context, String title) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 8.0),
-      child: Text(
-        title,
-        style: const TextStyle(fontWeight: FontWeight.bold),
+      child: Text(title,
+          style: const TextStyle(fontWeight: FontWeight.bold)),
+    );
+  }
+}
+
+// =============================================================================
+// _MfaEnrollDialog
+//
+// Extracted into its own StatefulWidget so it manages its own async lifecycle
+// cleanly. The parent _LoginSectionState stays simple — it just opens this
+// dialog and waits for onEnrolled / onCancelled.
+//
+// LAYOUT (two visual pages within one dialog):
+//
+//   Page 0 — Scan QR code
+//     ┌──────────────────────────────────────┐
+//     │  Scan this QR code with your         │
+//     │  authenticator app                   │
+//     │                                      │
+//     │  ┌──────────────────────────────┐    │
+//     │  │  <SVG QR code from Supabase> │    │
+//     │  └──────────────────────────────┘    │
+//     │                                      │
+//     │  Can't scan?  [show secret]          │
+//     │  <base32 secret + copy button>       │
+//     │                                      │
+//     │  [Cancel]              [Next →]      │
+//     └──────────────────────────────────────┘
+//
+//   Page 1 — Enter code
+//     ┌──────────────────────────────────────┐
+//     │  Enter the 6-digit code shown        │
+//     │  in your authenticator app           │
+//     │                                      │
+//     │  ┌──────────────────────────────┐    │
+//     │  │  [ _ _ _ - _ _ _ ]           │    │
+//     │  └──────────────────────────────┘    │
+//     │                                      │
+//     │  [← Back]              [Verify]      │
+//     └──────────────────────────────────────┘
+// =============================================================================
+class _MfaEnrollDialog extends StatefulWidget {
+  final SupabaseClient supabase;
+  final VoidCallback   onEnrolled;
+  final VoidCallback   onCancelled;
+
+  const _MfaEnrollDialog({
+    required this.supabase,
+    required this.onEnrolled,
+    required this.onCancelled,
+  });
+
+  @override
+  State<_MfaEnrollDialog> createState() => _MfaEnrollDialogState();
+}
+
+class _MfaEnrollDialogState extends State<_MfaEnrollDialog> {
+  // Enrollment data returned by enroll()
+  String? _factorId;
+  String? _qrSvg;    // raw SVG string — rendered with SvgPicture.string()
+  String? _secret;   // base32 secret for manual entry
+
+  // UI state
+  int  _page          = 0;    // 0 = scan QR, 1 = enter code
+  bool _loadingEnroll = true; // true while enroll() is in-flight
+  bool _loadingVerify = false;
+  bool _showSecret    = false;
+  String? _errorMessage;
+
+  final _codeCtrl = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    _startEnrollment();
+  }
+
+  @override
+  void dispose() {
+    _codeCtrl.dispose();
+    super.dispose();
+  }
+
+  /// Step 1 — enroll()
+  /// Creates the factor in auth.mfa_factors (status = 'unverified') and
+  /// returns the QR code and secret needed by the authenticator app.
+  Future<void> _startEnrollment() async {
+    try {
+      final response = await widget.supabase.auth.mfa.enroll(
+        factorType: FactorType.totp,
+        // issuer and friendlyName appear in the authenticator app's entry list.
+        issuer: 'ORINX',
+        friendlyName: widget.supabase.auth.currentUser?.email ?? 'ORINX Account',
+      );
+      if (mounted) {
+        setState(() {
+          _factorId     = response.id;
+          final totp = response.totp;
+if (totp != null) {
+  _qrSvg = totp.qrCode;
+  _secret = totp.secret;
+}
+          _loadingEnroll = false;
+        });
+      }
+    } on AuthException catch (e) {
+      if (mounted) {
+        setState(() {
+          _errorMessage  = e.message;
+          _loadingEnroll = false;
+        });
+      }
+    }
+  }
+
+  /// Steps 2 + 3 — challenge() then verify()
+  /// Called each time the user presses "Verify" on page 1.
+  /// A fresh challenge is created every attempt so expired challenges
+  /// don't cause spurious errors on retries.
+  Future<void> _verifyCode() async {
+    final code     = _codeCtrl.text.trim();
+    final factorId = _factorId;
+
+    if (factorId == null) return;
+    if (code.length != 6) {
+      setState(() => _errorMessage = 'Enter the 6-digit code from your app.');
+      return;
+    }
+
+    setState(() {
+      _loadingVerify = true;
+      _errorMessage  = null;
+    });
+
+    try {
+      // Step 2 — create a challenge for this factor
+      final challengeRes = await widget.supabase.auth.mfa
+          .challenge(factorId: factorId);
+
+      // Step 3 — verify the TOTP code against the challenge
+      await widget.supabase.auth.mfa.verify(
+        factorId:    factorId,
+        challengeId: challengeRes.id,
+        code:        code,
+      );
+
+      // Success — factor is now verified (status = 'verified'), session
+      // AAL is upgraded to aal2 automatically by the SDK.
+      widget.onEnrolled();
+    } on AuthException catch (e) {
+      if (mounted) {
+        setState(() {
+          // Map the most common server error to a friendlier message.
+          _errorMessage = e.message.toLowerCase().contains('invalid')
+              ? 'Incorrect code. Check your authenticator app and try again.'
+              : e.message;
+          _loadingVerify = false;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(_page == 0
+          ? 'Set up authenticator app'
+          : 'Verify authenticator app'),
+      // Fixed height so the dialog doesn't jump between pages.
+      content: SizedBox(
+        width: 320,
+        child: _page == 0 ? _buildScanPage() : _buildVerifyPage(),
+      ),
+      actions: _page == 0 ? _scanActions() : _verifyActions(),
+    );
+  }
+
+  // ── Page 0: QR code ───────────────────────────────────────────────────────
+
+  Widget _buildScanPage() {
+    if (_loadingEnroll) {
+      return const SizedBox(
+        height: 200,
+        child: Center(child: CircularProgressIndicator()),
+      );
+    }
+
+    if (_errorMessage != null && _qrSvg == null) {
+      return SizedBox(
+        height: 120,
+        child: Center(
+          child: Text(
+            _errorMessage!,
+            style: const TextStyle(color: Colors.red),
+            textAlign: TextAlign.center,
+          ),
+        ),
+      );
+    }
+
+    return SingleChildScrollView(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Text(
+            'Open your authenticator app (Google Authenticator, Authy, '
+            '1Password, etc.) and scan this QR code.',
+          ),
+          const SizedBox(height: 20),
+
+          // QR code — Supabase returns raw SVG.
+          // flutter_svg renders it natively without needing an image codec.
+          if (_qrSvg != null)
+            Container(
+              width: 200,
+              height: 200,
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.white, // QR codes need white background
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.grey.shade300),
+              ),
+              child: SvgPicture.string(
+                _qrSvg!,
+                fit: BoxFit.contain,
+              ),
+            ),
+
+          const SizedBox(height: 16),
+
+          // Manual entry fallback
+          TextButton.icon(
+            icon: Icon(
+                _showSecret ? Icons.visibility_off : Icons.visibility_outlined,
+                size: 16),
+            label: Text(_showSecret ? 'Hide secret key' : 'Can\'t scan? Show secret key'),
+            onPressed: () => setState(() => _showSecret = !_showSecret),
+            style: TextButton.styleFrom(foregroundColor: Colors.grey.shade700),
+          ),
+
+          if (_showSecret && _secret != null) ...[
+            const SizedBox(height: 8),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.grey.shade100,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.grey.shade300),
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: SelectableText(
+                      _secret!,
+                      style: const TextStyle(
+                        fontFamily: 'monospace',
+                        fontSize: 13,
+                        letterSpacing: 1.5,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.copy, size: 16),
+                    tooltip: 'Copy secret',
+                    onPressed: () {
+                      Clipboard.setData(ClipboardData(text: _secret!));
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('Secret copied to clipboard.'),
+                          behavior: SnackBarBehavior.floating,
+                          duration: Duration(seconds: 2),
+                        ),
+                      );
+                    },
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              'Type or paste this key into your authenticator app.',
+              style: TextStyle(color: Colors.grey, fontSize: 12),
+            ),
+          ],
+        ],
       ),
     );
   }
+
+  List<Widget> _scanActions() => [
+        TextButton(
+          onPressed: widget.onCancelled,
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: _loadingEnroll || _qrSvg == null
+              ? null
+              : () => setState(() {
+                    _page         = 1;
+                    _errorMessage = null;
+                  }),
+          child: const Text('Next →'),
+        ),
+      ];
+
+  // ── Page 1: enter code ────────────────────────────────────────────────────
+
+  Widget _buildVerifyPage() {
+    return SingleChildScrollView(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Enter the 6-digit code currently shown in your authenticator app '
+            'to confirm the setup is working.',
+          ),
+          const SizedBox(height: 24),
+
+          TextField(
+            controller: _codeCtrl,
+            enabled: !_loadingVerify,
+            autofocus: true,
+            keyboardType: TextInputType.number,
+            // Allow only digits; TOTP codes are always 6 numeric digits.
+            inputFormatters: [
+              FilteringTextInputFormatter.digitsOnly,
+              LengthLimitingTextInputFormatter(6),
+            ],
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              fontSize: 28,
+              fontFamily: 'monospace',
+              letterSpacing: 8,
+              fontWeight: FontWeight.bold,
+            ),
+            decoration: InputDecoration(
+              hintText: '000000',
+              hintStyle: TextStyle(
+                color: Colors.grey.shade400,
+                letterSpacing: 8,
+              ),
+              border: const OutlineInputBorder(),
+              errorText: _errorMessage,
+              // Live feedback: green border when 6 digits entered
+              enabledBorder: OutlineInputBorder(
+                borderSide: BorderSide(
+                  color: _codeCtrl.text.length == 6
+                      ? Colors.green
+                      : Colors.grey.shade400,
+                  width: _codeCtrl.text.length == 6 ? 2 : 1,
+                ),
+              ),
+            ),
+            onChanged: (_) => setState(() => _errorMessage = null),
+            // Submit on keyboard "done" / Enter key
+            onSubmitted: (_) {
+              if (!_loadingVerify) _verifyCode();
+            },
+          ),
+
+          const SizedBox(height: 12),
+          const Text(
+            'Codes refresh every 30 seconds. If the code is rejected, '
+            'wait for the next one and try again.',
+            style: TextStyle(color: Colors.grey, fontSize: 12),
+          ),
+        ],
+      ),
+    );
+  }
+
+  List<Widget> _verifyActions() => [
+        TextButton(
+          onPressed: _loadingVerify
+              ? null
+              : () => setState(() {
+                    _page         = 0;
+                    _errorMessage = null;
+                    _codeCtrl.clear();
+                  }),
+          child: const Text('← Back'),
+        ),
+        FilledButton(
+          onPressed: _loadingVerify ? null : _verifyCode,
+          child: _loadingVerify
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                      strokeWidth: 2, color: Colors.white),
+                )
+              : const Text('Verify'),
+        ),
+      ];
 }
