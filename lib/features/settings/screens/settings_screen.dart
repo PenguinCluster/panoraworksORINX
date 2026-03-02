@@ -10,7 +10,16 @@ import '../../../core/state/team_context_controller.dart';
 
 class SettingsScreen extends StatefulWidget {
   final String initialTab;
-  const SettingsScreen({super.key, this.initialTab = 'profile'});
+
+  /// True when the user has just been redirected back from Flutterwave
+  /// (the router reads ?payment=success from the URL and sets this).
+  final bool paymentSuccess;
+
+  const SettingsScreen({
+    super.key,
+    this.initialTab = 'profile',
+    this.paymentSuccess = false,
+  });
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
@@ -75,8 +84,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       case 'team':
         return controller.canAccessTeamTab;
       case 'billing':
-        // RBAC: canAccessBillingTab is now owner-only (changed from isOwner || isAdmin).
-        // Admins see the item visually locked rather than hidden.
         return controller.canAccessBillingTab;
       case 'orders':
         return controller.canAccessOrdersTab;
@@ -85,14 +92,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  /// Returns a non-null tooltip string when this slug is visible but gated
-  /// for the current user's role, explaining why it is disabled.
   String? _disabledTooltip(String slug, TeamContextController controller) {
-    // Only admins see workspace-level items that are then locked.
-    // Members and managers don't see billing/orders at all (canAccessTeamTab
-    // is already false for them, so they never reach this check).
     if (!controller.isAdmin) return null;
-
     switch (slug) {
       case 'billing':
         return 'Billing is only accessible to the workspace owner';
@@ -115,7 +116,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
       case 'team':
         return const TeamSection();
       case 'billing':
-        return const BillingSection();
+        // Forward paymentSuccess so BillingSection shows the banner and starts
+        // polling/realtime immediately when the user lands here post-payment.
+        return BillingSection(
+          paymentJustCompleted:
+              widget.paymentSuccess && currentSlug == 'billing',
+        );
       case 'orders':
         return const OrdersSection();
       default:
@@ -142,6 +148,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  bool _isItemVisible(String slug, TeamContextController controller) {
+    switch (slug) {
+      case 'profile':
+      case 'login':
+      case 'accessibility':
+        return true;
+      case 'team':
+        return controller.canAccessTeamTab;
+      case 'billing':
+      case 'orders':
+        return controller.canAccessWorkspaceSettings;
+      default:
+        return false;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final isDesktop = MediaQuery.of(context).size.width > 900;
@@ -157,6 +179,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
           );
         }
 
+        // Safety fallback: snap to Profile if current tab is no longer accessible
+        final visibleSlugs = _allSlugs
+            .where((s) => _isItemVisible(s, controller))
+            .toList();
+        if (_selectedIndex < _allSlugs.length &&
+            !_isItemVisible(_allSlugs[_selectedIndex], controller)) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) setState(() => _selectedIndex = 0);
+          });
+        }
+
         return Scaffold(
           appBar: AppBar(
             title: const Text('Settings'),
@@ -166,133 +199,52 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             actions: [_HelpAndResourcesButton()],
           ),
-          body: Builder(
-            builder: (context) {
-              // Safety fallback: if the current tab is no longer accessible
-              // after a role change, snap back to Profile.
-              int effectiveIndex = _selectedIndex;
-              if (!_isSectionEnabled(_allSlugs[effectiveIndex])) {
-                effectiveIndex = 0;
-              }
-
-              return Row(
-                children: [
-                  // ── Sidebar ───────────────────────────────────────────────
-                  Container(
-                    width: isDesktop ? 280 : 80,
-                    decoration: BoxDecoration(
-                      border: Border(
-                        right: BorderSide(
-                            color: Theme.of(context).dividerColor),
-                      ),
-                    ),
-                    child: ListView.builder(
-                      itemCount: _allSections.length,
-                      itemBuilder: (context, index) {
-                        final slug = _allSlugs[index];
-                        final label = _allSections[index];
-                        final isEnabled = _isSectionEnabled(slug);
-                        final isSelected = effectiveIndex == index;
-                        final tooltip = _disabledTooltip(slug, controller);
-
-                        // Determine whether this item should appear at all.
-                        // Items the current role has no awareness of are hidden.
-                        // Items that are visible-but-locked show a lock badge.
-                        final isVisible = _isItemVisible(slug, controller);
-                        if (!isVisible) return const SizedBox.shrink();
-
-                        final listTile = ListTile(
-                          selected: isSelected,
-                          enabled: isEnabled,
-                          leading: isDesktop
-                              ? _getIconForSlug(slug)
-                              : _getIconForSlug(slug),
-                          title: isDesktop
-                              ? Row(
-                                  children: [
-                                    Expanded(
-                                      child: Text(
-                                        label,
-                                        style: isEnabled
-                                            ? null
-                                            : TextStyle(
-                                                color: Theme.of(context)
-                                                    .disabledColor,
-                                              ),
-                                      ),
-                                    ),
-                                    // Lock badge for owner-only items that
-                                    // admins can see but not access.
-                                    if (!isEnabled && tooltip != null)
-                                      Icon(
-                                        Icons.lock_outline,
-                                        size: 14,
-                                        color:
-                                            Theme.of(context).disabledColor,
-                                      ),
-                                  ],
-                                )
-                              : null,
-                          onTap: isEnabled
-                              ? () => _onSectionSelected(index)
-                              : null,
-                        );
-
-                        // Wrap in Tooltip when disabled and we have a reason.
-                        if (!isEnabled && tooltip != null) {
+          body: isDesktop
+              ? Row(
+                  children: [
+                    SizedBox(
+                      width: 240,
+                      child: ListView.builder(
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        itemCount: _allSlugs.length,
+                        itemBuilder: (context, index) {
+                          final slug = _allSlugs[index];
+                          if (!_isItemVisible(slug, controller)) {
+                            return const SizedBox.shrink();
+                          }
+                          final enabled = _isSectionEnabled(slug);
+                          final tooltip = _disabledTooltip(slug, controller);
                           return Tooltip(
-                            message: tooltip,
-                            child: listTile,
+                            message: tooltip ?? '',
+                            child: ListTile(
+                              leading: _getIconForSlug(slug),
+                              title: Text(_allSections[index]),
+                              selected: _selectedIndex == index,
+                              enabled: enabled,
+                              onTap: enabled
+                                  ? () => _onSectionSelected(index)
+                                  : null,
+                            ),
                           );
-                        }
-                        return listTile;
-                      },
-                    ),
-                  ),
-
-                  // ── Content pane ──────────────────────────────────────────
-                  Expanded(
-                    child: SingleChildScrollView(
-                      padding: EdgeInsets.all(isDesktop ? 32.0 : 16.0),
-                      child: ConstrainedBox(
-                        constraints: const BoxConstraints(maxWidth: 800),
-                        child: _buildContent(effectiveIndex),
+                        },
                       ),
                     ),
-                  ),
-                ],
-              );
-            },
-          ),
+                    const VerticalDivider(width: 1),
+                    Expanded(
+                      child: SingleChildScrollView(
+                        padding: const EdgeInsets.all(32),
+                        child: _buildContent(_selectedIndex),
+                      ),
+                    ),
+                  ],
+                )
+              : SingleChildScrollView(
+                  padding: const EdgeInsets.all(16),
+                  child: _buildContent(_selectedIndex),
+                ),
         );
       },
     );
-  }
-
-  /// Controls whether a sidebar item is rendered at all.
-  ///
-  /// Visibility rules:
-  ///   - All users see personal tabs (profile, login, accessibility).
-  ///   - Owner + admin see workspace tabs (team, billing, orders).
-  ///     Admins see billing/orders in the sidebar but locked — they need to
-  ///     understand the workspace structure even if they can't access billing.
-  ///   - Members and managers do not see workspace tabs at all.
-  bool _isItemVisible(String slug, TeamContextController controller) {
-    switch (slug) {
-      case 'profile':
-      case 'login':
-      case 'accessibility':
-        return true; // always visible
-      case 'team':
-        return controller.canAccessTeamTab;
-      case 'billing':
-      case 'orders':
-        // Admins see billing/orders locked; non-admins without canAccessBillingTab
-        // (i.e. managers, members) do not see them at all.
-        return controller.canAccessWorkspaceSettings;
-      default:
-        return false;
-    }
   }
 }
 

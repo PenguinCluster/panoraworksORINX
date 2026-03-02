@@ -70,20 +70,14 @@ final appRouter = GoRouter(
         location == '/auth/callback' ||
         location == '/join-team' ||
         location == '/set-password' ||
-        // /mfa-verify sits between signInWithPassword (aal1) and the app (aal2).
-        // The user has a valid session but hasn't completed MFA yet, so treat
-        // it as public to prevent the redirect guard from looping them to /login.
         location == '/mfa-verify';
 
-    // Never redirect away from auth flow screens — they manage their own navigation.
     if (location.contains('set-password') ||
         location.contains('join-team') ||
         location.contains('auth/callback')) {
       return null;
     }
 
-    // Root page with a Supabase auth code or token fragment → forward to
-    // auth/callback so the session can be exchanged properly.
     if (location == '/' &&
         (fullUri.queryParameters.containsKey('code') ||
             fullUri.fragment.contains('access_token='))) {
@@ -102,7 +96,6 @@ final appRouter = GoRouter(
       if (location == '/login' ||
           location == '/signup' ||
           location == '/forgot-password') {
-        // Use firstQueryParam so a duplicate next= doesn't redirect us to the wrong place.
         final next = sanitizeNext(firstQueryParam('next'));
         return next ?? '/app/overview';
       }
@@ -140,19 +133,6 @@ final appRouter = GoRouter(
     GoRoute(
       path: '/set-password',
       builder: (context, state) {
-        // FIX: Use queryParametersAll.first to get the CORRECT next value.
-        //
-        // The old code used state.uri.queryParameters['next'] which returns the
-        // LAST duplicate key. After the routing chain mangling from the old
-        // buildRedirectTo, the URL looked like:
-        //   /set-password?next=/join-team?token=TOKEN&next=/app/overview
-        //
-        // queryParameters['next'] returned '/app/overview' (last value).
-        // queryParametersAll['next']?.first returns '/join-team?token=TOKEN' (first). ✓
-        //
-        // With the new single-encoded buildRedirectTo this URL will never have
-        // duplicate next params, but this defence costs nothing and protects
-        // against any future regression.
         final next = state.uri.queryParametersAll['next']?.firstOrNull ??
             state.uri.queryParameters['next'];
         return SetPasswordScreen(next: next);
@@ -165,8 +145,6 @@ final appRouter = GoRouter(
     GoRoute(
       path: '/mfa-verify',
       builder: (context, state) {
-        // next is the destination after successful TOTP verification.
-        // Passed by LoginScreen after signInWithPassword() returns aal1→aal2.
         final next = state.uri.queryParametersAll['next']?.firstOrNull ??
             state.uri.queryParameters['next'];
         return MfaVerifyScreen(next: next);
@@ -175,7 +153,6 @@ final appRouter = GoRouter(
     GoRoute(
       path: '/join-team',
       builder: (context, state) {
-        // FIX: Use queryParametersAll.first for token as well.
         final token = state.uri.queryParametersAll['token']?.firstOrNull ??
             state.uri.queryParameters['token'];
         return JoinTeamScreen(token: token);
@@ -208,7 +185,13 @@ final appRouter = GoRouter(
           path: '/app/settings/:tab',
           builder: (context, state) {
             final tab = state.pathParameters['tab'] ?? 'profile';
-            return SettingsScreen(initialTab: tab);
+            // Read ?payment=success appended by flutterwave-init's redirect_url
+            final paymentSuccess =
+                state.uri.queryParameters['payment'] == 'success';
+            return SettingsScreen(
+              initialTab: tab,
+              paymentSuccess: paymentSuccess,
+            );
           },
         ),
         GoRoute(

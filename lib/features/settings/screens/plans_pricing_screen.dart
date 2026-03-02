@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:url_launcher/url_launcher.dart';
+import 'package:universal_html/html.dart' as html; // ← same-tab redirect
 import '../../../../core/utils/error_handler.dart';
 
 class PlansPricingScreen extends StatelessWidget {
@@ -62,6 +62,9 @@ class _PlansPricingContentState extends State<PlansPricingContent> {
   bool _isAnnual = false;
   bool _isLoading = false;
 
+  // Billing profile fetched from DB on init — used to pre-fill the dialog
+  Map<String, dynamic>? _savedBillingProfile;
+
   // =========================
   // Billing popup controllers
   // =========================
@@ -75,6 +78,12 @@ class _PlansPricingContentState extends State<PlansPricingContent> {
   final _postalCtrl = TextEditingController();
 
   @override
+  void initState() {
+    super.initState();
+    _loadBillingProfile();
+  }
+
+  @override
   void dispose() {
     _nameCtrl.dispose();
     _addr1Ctrl.dispose();
@@ -86,11 +95,50 @@ class _PlansPricingContentState extends State<PlansPricingContent> {
     super.dispose();
   }
 
-  // 1) Show billing form modal
+  // ─── Fetch the user's saved billing profile on mount ───────────────────────
+  Future<void> _loadBillingProfile() async {
+    try {
+      final client = Supabase.instance.client;
+      final user = client.auth.currentUser;
+      if (user == null) return;
+
+      final data = await client
+          .from('billing_profiles')
+          .select()
+          .eq('user_id', user.id)
+          .maybeSingle();
+
+      if (mounted && data != null) {
+        setState(() => _savedBillingProfile = data);
+      }
+    } catch (e) {
+      debugPrint('Failed to load billing profile: $e');
+    }
+  }
+
+  // ─── Pre-fill dialog controllers from saved profile ────────────────────────
+  void _prefillControllers(String defaultName) {
+    final p = _savedBillingProfile;
+    if (p != null) {
+      _nameCtrl.text = (p['full_name'] as String?)?.trim() ?? defaultName;
+      _addr1Ctrl.text = (p['address_line1'] as String?)?.trim() ?? '';
+      _addr2Ctrl.text = (p['address_line2'] as String?)?.trim() ?? '';
+      _cityCtrl.text = (p['city'] as String?)?.trim() ?? '';
+      _stateCtrl.text = (p['state'] as String?)?.trim() ?? '';
+      _countryCtrl.text = (p['country'] as String?)?.trim() ?? 'Nigeria';
+      _postalCtrl.text = (p['postal_code'] as String?)?.trim() ?? '';
+    } else {
+      // No saved profile — only seed the name field
+      if (defaultName.isNotEmpty) _nameCtrl.text = defaultName;
+    }
+  }
+
+  // 1) Show billing form modal (auto-filled from DB)
   Future<Map<String, dynamic>?> _showBillingDialog({
     required String defaultName,
   }) async {
-    _nameCtrl.text = defaultName.isNotEmpty ? defaultName : _nameCtrl.text;
+    // Pre-fill every field before the dialog opens
+    _prefillControllers(defaultName);
 
     return showDialog<Map<String, dynamic>>(
       context: context,
@@ -111,17 +159,15 @@ class _PlansPricingContentState extends State<PlansPricingContent> {
                 ),
                 TextFormField(
                   controller: _addr1Ctrl,
-                  decoration: const InputDecoration(
-                    labelText: 'Address line 1',
-                  ),
+                  decoration:
+                      const InputDecoration(labelText: 'Address line 1'),
                   validator: (v) =>
                       (v == null || v.trim().isEmpty) ? 'Required' : null,
                 ),
                 TextFormField(
                   controller: _addr2Ctrl,
                   decoration: const InputDecoration(
-                    labelText: 'Address line 2 (optional)',
-                  ),
+                      labelText: 'Address line 2 (optional)'),
                 ),
                 TextFormField(
                   controller: _cityCtrl,
@@ -131,9 +177,8 @@ class _PlansPricingContentState extends State<PlansPricingContent> {
                 ),
                 TextFormField(
                   controller: _stateCtrl,
-                  decoration: const InputDecoration(
-                    labelText: 'State (optional)',
-                  ),
+                  decoration:
+                      const InputDecoration(labelText: 'State (optional)'),
                 ),
                 TextFormField(
                   controller: _countryCtrl,
@@ -144,8 +189,7 @@ class _PlansPricingContentState extends State<PlansPricingContent> {
                 TextFormField(
                   controller: _postalCtrl,
                   decoration: const InputDecoration(
-                    labelText: 'Postal code (optional)',
-                  ),
+                      labelText: 'Postal code (optional)'),
                 ),
               ],
             ),
@@ -194,9 +238,12 @@ class _PlansPricingContentState extends State<PlansPricingContent> {
       'postal_code': billing['postal_code'],
       'updated_at': DateTime.now().toIso8601String(),
     });
+
+    // Keep local cache current so repeated upgrades stay pre-filled
+    if (mounted) setState(() => _savedBillingProfile = billing);
   }
 
-  // 3) Initiate payment (popup -> save -> invoke -> open link)
+  // 3) Initiate payment: popup → save → invoke edge fn → SAME-TAB redirect
   Future<void> _initiatePayment(String planName) async {
     if (_isLoading) return;
     setState(() => _isLoading = true);
@@ -210,39 +257,43 @@ class _PlansPricingContentState extends State<PlansPricingContent> {
         throw Exception('User not logged in');
       }
 
-      // Default name: from userMetadata or email prefix
+      // Resolve default name: userMetadata → saved profile → email prefix
       String defaultName =
           (user.userMetadata?['full_name'] as String?)?.trim() ?? '';
+      if (defaultName.isEmpty) {
+        defaultName =
+            (_savedBillingProfile?['full_name'] as String?)?.trim() ?? '';
+      }
       if (defaultName.isEmpty) {
         defaultName = (user.email ?? '').split('@').first;
       }
 
-      // A) popup billing form
+      // A) popup billing form (auto-filled from DB)
       final billing = await _showBillingDialog(defaultName: defaultName);
       if (billing == null) return; // user cancelled
 
-      // B) save to DB
+      // B) persist to billing_profiles
       await _saveBillingProfile(user.id, billing);
 
-      // C) fetch plan
+      // C) look up the plan
       final plans = await client.from('plans').select().eq('name', planName);
       if (plans.isEmpty) throw Exception('Plan not found');
 
       final plan = plans.first;
       final amount = _isAnnual ? plan['price_annual'] : plan['price_monthly'];
 
-      // D) invoke edge function
+      // D) call the edge function
       final response = await client.functions.invoke(
         'flutterwave-init',
         headers: {'Authorization': 'Bearer ${session.accessToken}'},
         body: {
           'email': user.email,
-          'name': billing['full_name'], // prefill name (if provider shows it)
+          'name': billing['full_name'],
           'amount': amount,
           'plan_id': plan['id'],
           'user_id': user.id,
           'interval': _isAnnual ? 'yearly' : 'monthly',
-          'billing_profile': billing, // attaches to meta / transaction
+          'billing_profile': billing,
         },
       );
 
@@ -266,9 +317,8 @@ class _PlansPricingContentState extends State<PlansPricingContent> {
       final link = resp['data']?['link'];
       if (link == null) throw Exception('Payment link missing from response');
 
-      final uri = Uri.parse(link);
-      final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
-      if (!ok) throw Exception('Could not launch payment link');
+      // ✅ Same-tab redirect — uses the current browser tab, no new window
+      html.window.location.assign(link);
     } catch (e) {
       if (mounted)
         ErrorHandler.handle(
@@ -283,93 +333,90 @@ class _PlansPricingContentState extends State<PlansPricingContent> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Plans and Pricing')),
-      body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : SingleChildScrollView(
-              padding: const EdgeInsets.all(32.0),
-              child: Column(
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      const Text('Monthly'),
-                      Switch(
-                        value: _isAnnual,
-                        onChanged: (v) => setState(() => _isAnnual = v),
-                      ),
-                      const Text('Annual (-20%)'),
-                    ],
-                  ),
-                  const SizedBox(height: 48),
-                  Wrap(
-                    spacing: 24,
-                    runSpacing: 24,
-                    alignment: WrapAlignment.center,
-                    children: [
-                      _PricingCard(
-                        title: 'O',
-                        price: _isAnnual ? '36' : '5',
-                        period: _isAnnual ? '/yr' : '/mo',
-                        features: const [
-                          'Basic features',
-                          '1 user',
-                          'Limited support',
-                        ],
-                        onSelect: () => _initiatePayment('O'),
-                      ),
-                      _PricingCard(
-                        title: 'R',
-                        price: _isAnnual ? '120' : '15',
-                        period: _isAnnual ? '/yr' : '/mo',
-                        features: const [
-                          'Advanced features',
-                          '5 users',
-                          'Priority support',
-                        ],
-                        onSelect: () => _initiatePayment('R'),
-                      ),
-                      _PricingCard(
-                        title: 'I',
-                        price: _isAnnual ? '240' : '25',
-                        period: _isAnnual ? '/yr' : '/mo',
-                        features: const [
-                          'Pro features',
-                          'Unlimited users',
-                          '24/7 support',
-                        ],
-                        onSelect: () => _initiatePayment('I'),
-                      ),
-                      _PricingCard(
-                        title: 'N',
-                        price: _isAnnual ? '540' : '50',
-                        period: _isAnnual ? '/yr' : '/mo',
-                        features: const [
-                          'Enterprise features',
-                          'Custom analytics',
-                          'Dedicated manager',
-                        ],
-                        onSelect: () => _initiatePayment('N'),
-                      ),
-                      _PricingCard(
-                        title: 'X',
-                        price: 'Contact Sales',
-                        period: '',
-                        features: const [
-                          'Custom solutions',
-                          'Full white-label',
-                          'On-premise option',
-                        ],
-                        isContact: true,
-                        onSelect: () {},
-                      ),
-                    ],
-                  ),
-                ],
-              ),
+    return _isLoading
+        ? const Center(child: CircularProgressIndicator())
+        : SingleChildScrollView(
+            padding: const EdgeInsets.all(32.0),
+            child: Column(
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Text('Monthly'),
+                    Switch(
+                      value: _isAnnual,
+                      onChanged: (v) => setState(() => _isAnnual = v),
+                    ),
+                    const Text('Annual (-20%)'),
+                  ],
+                ),
+                const SizedBox(height: 48),
+                Wrap(
+                  spacing: 24,
+                  runSpacing: 24,
+                  alignment: WrapAlignment.center,
+                  children: [
+                    _PricingCard(
+                      title: 'O',
+                      price: _isAnnual ? '36' : '5',
+                      period: _isAnnual ? '/yr' : '/mo',
+                      features: const [
+                        'Basic features',
+                        '1 user',
+                        'Limited support',
+                      ],
+                      onSelect: () => _initiatePayment('O'),
+                    ),
+                    _PricingCard(
+                      title: 'R',
+                      price: _isAnnual ? '120' : '15',
+                      period: _isAnnual ? '/yr' : '/mo',
+                      features: const [
+                        'Advanced features',
+                        '5 users',
+                        'Priority support',
+                      ],
+                      onSelect: () => _initiatePayment('R'),
+                    ),
+                    _PricingCard(
+                      title: 'I',
+                      price: _isAnnual ? '240' : '25',
+                      period: _isAnnual ? '/yr' : '/mo',
+                      features: const [
+                        'Pro features',
+                        'Unlimited users',
+                        '24/7 support',
+                      ],
+                      onSelect: () => _initiatePayment('I'),
+                    ),
+                    _PricingCard(
+                      title: 'N',
+                      price: _isAnnual ? '540' : '50',
+                      period: _isAnnual ? '/yr' : '/mo',
+                      features: const [
+                        'Enterprise features',
+                        'Custom analytics',
+                        'Dedicated manager',
+                      ],
+                      onSelect: () => _initiatePayment('N'),
+                    ),
+                    _PricingCard(
+                      title: 'X',
+                      price: 'Contact Sales',
+                      period: '',
+                      features: const [
+                        'Custom solutions',
+                        'Full white-label',
+                        'On-premise option',
+                      ],
+                      isContact: true,
+                      onSelect: () {},
+                    ),
+                  ],
+                ),
+              ],
             ),
-    );
+          );
   }
 }
 
